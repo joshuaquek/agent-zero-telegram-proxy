@@ -1,6 +1,6 @@
 # Agent Zero Telegram Proxy
 
-Chat with [Agent Zero](https://github.com/agent0ai/agent-zero) through Telegram. This runs as a Docker container alongside your Agent Zero setup.
+Chat with [Agent Zero](https://github.com/agent0ai/agent-zero) through Telegram. Supports text, photos, documents, and voice messages in both directions. Runs as a Docker container alongside your Agent Zero setup.
 
 ```
 You (Telegram) ──► Telegram Bot ──► This Proxy ──► Agent Zero
@@ -48,7 +48,7 @@ Add the `telegram-proxy` service to your existing `docker-compose.yml` / `compos
 docker compose up -d telegram-proxy
 ```
 
-Now message your bot on Telegram — it will respond with Agent Zero's replies.
+Now message your bot on Telegram — it will respond with Agent Zero's replies. You can send text, photos, documents, and voice messages.
 
 ## Bot Commands
 

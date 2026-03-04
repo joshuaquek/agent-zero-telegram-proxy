@@ -66,8 +66,8 @@ If the WebSocket connection to Agent Zero fails, the bot automatically falls bac
 
 | Endpoint | Purpose | When Used |
 |---|---|---|
-| `POST /message_queue_add` | Queue a message for the agent | Every text message (streaming path) |
-| `POST /message_queue_send` | Trigger agent processing | Every text message (streaming path) |
+| `POST /message_queue_add` | Queue a message (with optional attachments) for the agent | Every message (streaming path) |
+| `POST /message_queue_send` | Trigger agent processing | Every message (streaming path) |
 | `POST /api_message` | Send a message, get full response (blocking) | Fallback when WebSocket unavailable |
 | `POST /api_reset_chat` | Reset conversation state | `/reset` command |
 | WebSocket `/state_sync` | Real-time state push subscription | Streaming response updates |
