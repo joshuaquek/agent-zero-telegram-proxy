@@ -1,6 +1,8 @@
 import asyncio
+import base64
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass, field
 
@@ -15,6 +17,9 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+
+# Regex to find markdown images: ![alt](url)
+_IMAGE_RE = re.compile(r'!\[([^\]]*)\]\(([^)]+)\)')
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -97,7 +102,7 @@ class AgentZeroClient:
             data = response.json()
         return data.get("response") or data.get("message") or str(data)
 
-    async def send_message_streaming(self, context_id: str, text: str):
+    async def send_message_streaming(self, context_id: str, text: str, attachments: list | None = None):
         """Send a message and yield (response_text, is_done) as the agent streams.
 
         Uses the web UI message path (/message_queue_add + /message_queue_send)
@@ -194,7 +199,7 @@ class AgentZeroClient:
         try:
             await http_client.post(
                 f"{self.base_url}/message_queue_add",
-                json={"context": context_id, "text": text, "attachments": []},
+                json={"context": context_id, "text": text, "attachments": attachments or []},
                 headers={"X-API-KEY": self.api_key},
             )
             await http_client.post(
@@ -262,6 +267,46 @@ agent_client = AgentZeroClient(
 
 
 # ---------------------------------------------------------------------------
+# Image helpers
+# ---------------------------------------------------------------------------
+
+def extract_images_from_response(text: str) -> tuple[str, list[tuple[str, str]]]:
+    """Extract markdown image references from response text.
+
+    Returns (cleaned_text, [(alt_text, url), ...]).
+    """
+    images = _IMAGE_RE.findall(text)
+    cleaned = _IMAGE_RE.sub('', text).strip()
+    return cleaned, images
+
+
+async def send_response_with_images(bot, chat_id: int, text: str) -> None:
+    """Send a response that may contain markdown images as actual Telegram photos."""
+    cleaned_text, images = extract_images_from_response(text)
+
+    # Send each image as a Telegram photo
+    for alt_text, url in images:
+        # Resolve relative URLs against Agent Zero
+        if url.startswith("/"):
+            url = f"{AGENT_ZERO_URL}{url}"
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.get(url)
+                resp.raise_for_status()
+                image_bytes = resp.content
+            caption = alt_text if alt_text else None
+            await bot.send_photo(chat_id=chat_id, photo=image_bytes, caption=caption)
+        except Exception:
+            logger.warning("Failed to send image %s, sending URL as text", url)
+            await bot.send_message(chat_id=chat_id, text=f"[Image: {alt_text or url}]({url})")
+
+    # Send remaining text
+    if cleaned_text:
+        for i in range(0, len(cleaned_text), 4096):
+            await bot.send_message(chat_id=chat_id, text=cleaned_text[i : i + 4096])
+
+
+# ---------------------------------------------------------------------------
 # Telegram Handlers
 # ---------------------------------------------------------------------------
 
@@ -290,7 +335,9 @@ async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text("Failed to reset the conversation. Please try again.")
 
 
-async def _stream_to_private_chat(bot, chat_id: int, ctx_id: str, text: str) -> None:
+async def _stream_to_private_chat(
+    bot, chat_id: int, ctx_id: str, text: str, attachments: list | None = None,
+) -> None:
     """Stream response to a private chat using sendMessageDraft."""
     draft_id = int(time.time() * 1000) % (2**31 - 1)  # unique draft ID per message
     last_draft_time = 0.0
@@ -298,7 +345,7 @@ async def _stream_to_private_chat(bot, chat_id: int, ctx_id: str, text: str) -> 
     final_text = ""
 
     try:
-        async for response_text, is_done in agent_client.send_message_streaming(ctx_id, text):
+        async for response_text, is_done in agent_client.send_message_streaming(ctx_id, text, attachments):
             final_text = response_text
             now = time.monotonic()
 
@@ -325,15 +372,16 @@ async def _stream_to_private_chat(bot, chat_id: int, ctx_id: str, text: str) -> 
     except Exception:
         logger.exception("Streaming failed")
 
-    # Send final message
+    # Send final message (with image support)
     if not final_text or not final_text.strip():
         final_text = "(Agent Zero returned an empty response.)"
 
-    for i in range(0, len(final_text), 4096):
-        await bot.send_message(chat_id=chat_id, text=final_text[i : i + 4096])
+    await send_response_with_images(bot, chat_id, final_text)
 
 
-async def _stream_to_group_chat(bot, chat_id: int, ctx_id: str, text: str) -> None:
+async def _stream_to_group_chat(
+    bot, chat_id: int, ctx_id: str, text: str, attachments: list | None = None,
+) -> None:
     """Stream response to a group chat using sendMessage + editMessageText."""
     sent_message = None
     last_edit_time = 0.0
@@ -341,7 +389,7 @@ async def _stream_to_group_chat(bot, chat_id: int, ctx_id: str, text: str) -> No
     final_text = ""
 
     try:
-        async for response_text, is_done in agent_client.send_message_streaming(ctx_id, text):
+        async for response_text, is_done in agent_client.send_message_streaming(ctx_id, text, attachments):
             final_text = response_text
             now = time.monotonic()
 
@@ -375,24 +423,35 @@ async def _stream_to_group_chat(bot, chat_id: int, ctx_id: str, text: str) -> No
     if not final_text or not final_text.strip():
         final_text = "(Agent Zero returned an empty response.)"
 
-    # Final update
-    final_chunk = final_text[:4096]
-    try:
-        if sent_message is None:
-            sent_message = await bot.send_message(chat_id=chat_id, text=final_chunk)
-        else:
-            await bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=sent_message.message_id,
-                text=final_chunk,
-            )
-    except Exception:
-        # If edit fails, send as new message
-        await bot.send_message(chat_id=chat_id, text=final_chunk)
+    # Delete the streaming preview message before sending final response with images
+    _, images = extract_images_from_response(final_text)
+    if images and sent_message is not None:
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=sent_message.message_id)
+            sent_message = None
+        except Exception:
+            logger.debug("Failed to delete preview message")
 
-    # Send remaining chunks if response > 4096 chars
-    for i in range(4096, len(final_text), 4096):
-        await bot.send_message(chat_id=chat_id, text=final_text[i : i + 4096])
+    if images:
+        # Send final response using image-aware helper
+        await send_response_with_images(bot, chat_id, final_text)
+    else:
+        # No images — do the normal final edit or send
+        final_chunk = final_text[:4096]
+        try:
+            if sent_message is None:
+                await bot.send_message(chat_id=chat_id, text=final_chunk)
+            else:
+                await bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=sent_message.message_id,
+                    text=final_chunk,
+                )
+        except Exception:
+            await bot.send_message(chat_id=chat_id, text=final_chunk)
+
+        for i in range(4096, len(final_text), 4096):
+            await bot.send_message(chat_id=chat_id, text=final_text[i : i + 4096])
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -422,12 +481,57 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text("Something went wrong while contacting Agent Zero.")
 
 
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_allowed(update.effective_user.id):
+        await update.message.reply_text("Sorry, you are not authorized to use this bot.")
+        return
+
+    chat_id = update.effective_chat.id
+    ctx_id = context_id_for(chat_id)
+    is_private = update.effective_chat.type == ChatType.PRIVATE
+
+    # Download the highest-resolution photo
+    photo = update.message.photo[-1]
+    try:
+        file = await photo.get_file()
+        photo_bytes = await file.download_as_bytearray()
+    except Exception:
+        logger.exception("Failed to download photo from Telegram")
+        await update.message.reply_text("Failed to download the photo. Please try again.")
+        return
+
+    # Encode as base64 data URI for Agent Zero
+    b64_data = base64.b64encode(photo_bytes).decode("utf-8")
+    attachment = {
+        "path": f"data:image/jpeg;base64,{b64_data}",
+        "name": f"photo_{photo.file_unique_id}.jpg",
+    }
+
+    user_text = update.message.caption or "(Photo sent)"
+
+    await update.effective_chat.send_action("typing")
+
+    try:
+        if is_private:
+            await _stream_to_private_chat(context.bot, chat_id, ctx_id, user_text, [attachment])
+        else:
+            await _stream_to_group_chat(context.bot, chat_id, ctx_id, user_text, [attachment])
+    except httpx.TimeoutException:
+        await update.message.reply_text("Agent Zero took too long to respond. Please try again.")
+    except httpx.ConnectError:
+        await update.message.reply_text("Cannot reach Agent Zero. Is the service running?")
+    except Exception:
+        logger.exception("Error handling photo message")
+        await update.message.reply_text("Something went wrong while contacting Agent Zero.")
+
+
 def main() -> None:
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("reset", reset_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
     logger.info("Telegram proxy bot starting (long-polling mode, streaming enabled)...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
