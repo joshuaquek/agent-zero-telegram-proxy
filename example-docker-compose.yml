@@ -1,0 +1,49 @@
+# Example: Adding the Telegram proxy to your existing Agent Zero docker-compose setup.
+#
+# Copy the "telegram-proxy" service block into your own compose.yml.
+# Make sure your Agent Zero service is named "agent-zero" (or update AGENT_ZERO_URL).
+
+services:
+  agent-zero:
+    image: agent0ai/agent-zero:latest
+    container_name: agent-zero
+    restart: unless-stopped
+    ports:
+      - "50080:80"       # Agent Zero Web UI
+    environment:
+      - AUTH_LOGIN=admin
+      - AUTH_PASSWORD=Test1234!
+    volumes:
+      - ./agent-zero-data/usr:/a0/usr
+    networks:
+      - proxy-net
+
+  telegram-proxy:
+    image: opendigitalsociety/agent-zero-telegram-proxy:latest
+    container_name: telegram-proxy
+    restart: unless-stopped
+    environment:
+      # Required — get this from @BotFather on Telegram
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+
+      # Required — find this in Agent Zero UI → Settings → External Services
+      - AGENT_ZERO_API_KEY=${AGENT_ZERO_API_KEY}
+
+      # Agent Zero URL (default works when service is named "agent-zero")
+      - AGENT_ZERO_URL=http://agent-zero:80
+
+      # Optional — comma-separated Telegram user IDs allowed to use the bot
+      # Leave empty to allow everyone (not recommended for public bots)
+      # Find your ID by messaging @userinfobot on Telegram
+      - ALLOWED_TELEGRAM_USER_IDS=${ALLOWED_TELEGRAM_USER_IDS:-}
+
+      # Optional — timeout in seconds for Agent Zero API calls (default: 120)
+      - REQUEST_TIMEOUT_SECONDS=${REQUEST_TIMEOUT_SECONDS:-120}
+    depends_on:
+      - agent-zero
+    networks:
+      - proxy-net
+
+networks:
+  proxy-net:
+    driver: bridge

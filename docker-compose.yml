@@ -1,0 +1,18 @@
+services:
+  agent-zero:
+    container_name: agent-zero
+    image: agent0ai/agent-zero:latest
+    volumes:
+      - ./agent-zero-data:/a0/usr
+    ports:
+      - "50080:80"
+    restart: unless-stopped
+
+  telegram-proxy:
+    container_name: telegram-proxy
+    build: .
+    env_file:
+      - .env
+    depends_on:
+      - agent-zero
+    restart: unless-stopped
