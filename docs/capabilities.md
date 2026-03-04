@@ -8,8 +8,12 @@ The bot streams Agent Zero's response to you in real-time as it's being generate
 ### Message Forwarding
 Every text message you send to the Telegram bot is forwarded to Agent Zero. The agent's full response is sent back to you in Telegram. Long responses (over 4096 characters) are automatically split into multiple messages.
 
-### Image Support
-You can send photos to the bot — they are forwarded to Agent Zero as base64 attachments along with any caption text. When Agent Zero's response contains markdown images (`![alt](url)`), the bot downloads them and sends them as native Telegram photos instead of raw URLs.
+### Media Support (Images, Documents, Voice)
+You can send **photos**, **documents** (PDF, Word, Excel, ZIP, etc.), and **voice messages** to the bot — they are forwarded to Agent Zero as base64 attachments along with any caption text. When Agent Zero's response contains markdown media references, the bot downloads them and sends them as native Telegram media:
+
+- `![alt](url)` with image extensions → sent as a **photo**
+- `![alt](url)` or `[text](url)` with document extensions (.pdf, .docx, .csv, etc.) → sent as a **document**
+- `![alt](url)` or `[text](url)` with voice/audio extensions (.ogg, .mp3, etc.) → sent as **voice** or **audio**
 
 ### Persistent Conversations
 Each Telegram chat maintains its own ongoing conversation with Agent Zero. You can have a multi-turn dialogue just like in the Agent Zero web UI — the agent remembers previous messages in the same chat.
@@ -70,6 +74,6 @@ If the WebSocket connection to Agent Zero fails, the bot automatically falls bac
 
 ## Limitations
 
-- **Images supported, other media not yet**: The bot supports photos in both directions (Telegram → Agent Zero and Agent Zero → Telegram). Documents, voice messages, and other media types are not yet supported.
+- **Supported media types**: Photos, documents, and voice messages work in both directions. Video and sticker support is not yet implemented.
 - **No markdown in drafts**: During streaming, draft text is sent as plain text. Markdown formatting is only applied on the final sent message.
 - **In-memory state**: The Telegram-to-context mapping is stored in memory. If the proxy container restarts, the mapping resets — but this is usually fine since the context IDs are deterministic (based on chat ID).

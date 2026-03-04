@@ -20,6 +20,24 @@ from telegram.ext import (
 
 # Regex to find markdown images: ![alt](url)
 _IMAGE_RE = re.compile(r'!\[([^\]]*)\]\(([^)]+)\)')
+# Regex to find markdown links: [text](url)
+_LINK_RE = re.compile(r'\[([^\]]*)\]\(([^)]+)\)')
+
+_IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'}
+_VOICE_EXTENSIONS = {'.ogg', '.oga'}
+_AUDIO_EXTENSIONS = {'.mp3', '.wav', '.flac', '.aac', '.m4a'} | _VOICE_EXTENSIONS
+_DOCUMENT_EXTENSIONS = {
+    '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
+    '.txt', '.csv', '.zip', '.tar', '.gz', '.7z', '.rar',
+    '.json', '.xml', '.yaml', '.yml', '.py', '.js', '.ts', '.html', '.css',
+}
+
+
+def _url_extension(url: str) -> str:
+    """Return the lowercase file extension from a URL, ignoring query params."""
+    path = url.split('?')[0].split('#')[0]
+    dot = path.rfind('.')
+    return path[dot:].lower() if dot != -1 else ""
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -267,38 +285,106 @@ agent_client = AgentZeroClient(
 
 
 # ---------------------------------------------------------------------------
-# Image helpers
+# Media helpers
 # ---------------------------------------------------------------------------
 
-def extract_images_from_response(text: str) -> tuple[str, list[tuple[str, str]]]:
-    """Extract markdown image references from response text.
+@dataclass
+class MediaItem:
+    """A media reference extracted from Agent Zero's response."""
+    kind: str  # "image", "voice", "audio", "document"
+    alt: str
+    url: str
 
-    Returns (cleaned_text, [(alt_text, url), ...]).
+
+def extract_media_from_response(text: str) -> tuple[str, list[MediaItem]]:
+    """Extract markdown image and file references from response text.
+
+    Returns (cleaned_text, [MediaItem, ...]).
     """
-    images = _IMAGE_RE.findall(text)
-    cleaned = _IMAGE_RE.sub('', text).strip()
-    return cleaned, images
+    media: list[MediaItem] = []
+    patterns_to_strip: list[re.Match] = []
+
+    # 1) Markdown images: ![alt](url) — always treated as images
+    for m in _IMAGE_RE.finditer(text):
+        alt, url = m.group(1), m.group(2)
+        ext = _url_extension(url)
+        if ext in _VOICE_EXTENSIONS:
+            media.append(MediaItem("voice", alt, url))
+        elif ext in _AUDIO_EXTENSIONS:
+            media.append(MediaItem("audio", alt, url))
+        elif ext in _DOCUMENT_EXTENSIONS:
+            media.append(MediaItem("document", alt, url))
+        else:
+            media.append(MediaItem("image", alt, url))
+        patterns_to_strip.append(m)
+
+    # 2) Markdown links: [text](url) — classify by extension
+    for m in _LINK_RE.finditer(text):
+        # Skip if this link was already captured as an image (![...](...)  contains [...](...))
+        if any(im.start() < m.start() < im.end() for im in patterns_to_strip):
+            continue
+        alt, url = m.group(1), m.group(2)
+        ext = _url_extension(url)
+        if ext in _IMAGE_EXTENSIONS:
+            media.append(MediaItem("image", alt, url))
+            patterns_to_strip.append(m)
+        elif ext in _VOICE_EXTENSIONS:
+            media.append(MediaItem("voice", alt, url))
+            patterns_to_strip.append(m)
+        elif ext in _AUDIO_EXTENSIONS:
+            media.append(MediaItem("audio", alt, url))
+            patterns_to_strip.append(m)
+        elif ext in _DOCUMENT_EXTENSIONS:
+            media.append(MediaItem("document", alt, url))
+            patterns_to_strip.append(m)
+
+    # Strip matched patterns from the text (process from end to preserve positions)
+    cleaned = text
+    for m in sorted(patterns_to_strip, key=lambda x: x.start(), reverse=True):
+        cleaned = cleaned[:m.start()] + cleaned[m.end():]
+    cleaned = cleaned.strip()
+
+    return cleaned, media
 
 
-async def send_response_with_images(bot, chat_id: int, text: str) -> None:
-    """Send a response that may contain markdown images as actual Telegram photos."""
-    cleaned_text, images = extract_images_from_response(text)
+def _resolve_url(url: str) -> str:
+    """Prepend AGENT_ZERO_URL to relative URLs."""
+    if url.startswith("/"):
+        return f"{AGENT_ZERO_URL}{url}"
+    return url
 
-    # Send each image as a Telegram photo
-    for alt_text, url in images:
-        # Resolve relative URLs against Agent Zero
-        if url.startswith("/"):
-            url = f"{AGENT_ZERO_URL}{url}"
+
+async def _download_file(url: str) -> bytes:
+    """Download a file from a URL and return its bytes."""
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(url)
+        resp.raise_for_status()
+        return resp.content
+
+
+async def send_response_with_media(bot, chat_id: int, text: str) -> None:
+    """Send a response that may contain markdown media as native Telegram media."""
+    cleaned_text, media_items = extract_media_from_response(text)
+
+    for item in media_items:
+        url = _resolve_url(item.url)
+        caption = item.alt if item.alt else None
         try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.get(url)
-                resp.raise_for_status()
-                image_bytes = resp.content
-            caption = alt_text if alt_text else None
-            await bot.send_photo(chat_id=chat_id, photo=image_bytes, caption=caption)
+            file_bytes = await _download_file(url)
+            if item.kind == "image":
+                await bot.send_photo(chat_id=chat_id, photo=file_bytes, caption=caption)
+            elif item.kind == "voice":
+                await bot.send_voice(chat_id=chat_id, voice=file_bytes, caption=caption)
+            elif item.kind == "audio":
+                await bot.send_audio(chat_id=chat_id, audio=file_bytes, caption=caption,
+                                     title=item.alt or None)
+            elif item.kind == "document":
+                filename = item.alt or item.url.split('/')[-1].split('?')[0]
+                await bot.send_document(chat_id=chat_id, document=file_bytes,
+                                        filename=filename, caption=caption)
         except Exception:
-            logger.warning("Failed to send image %s, sending URL as text", url)
-            await bot.send_message(chat_id=chat_id, text=f"[Image: {alt_text or url}]({url})")
+            logger.warning("Failed to send %s %s, sending as text link", item.kind, url)
+            await bot.send_message(chat_id=chat_id, text=f"[{item.alt or item.kind}: {url}]({url})")
 
     # Send remaining text
     if cleaned_text:
@@ -376,7 +462,7 @@ async def _stream_to_private_chat(
     if not final_text or not final_text.strip():
         final_text = "(Agent Zero returned an empty response.)"
 
-    await send_response_with_images(bot, chat_id, final_text)
+    await send_response_with_media(bot, chat_id, final_text)
 
 
 async def _stream_to_group_chat(
@@ -424,17 +510,17 @@ async def _stream_to_group_chat(
         final_text = "(Agent Zero returned an empty response.)"
 
     # Delete the streaming preview message before sending final response with images
-    _, images = extract_images_from_response(final_text)
-    if images and sent_message is not None:
+    _, media_items = extract_media_from_response(final_text)
+    if media_items and sent_message is not None:
         try:
             await bot.delete_message(chat_id=chat_id, message_id=sent_message.message_id)
             sent_message = None
         except Exception:
             logger.debug("Failed to delete preview message")
 
-    if images:
+    if media_items:
         # Send final response using image-aware helper
-        await send_response_with_images(bot, chat_id, final_text)
+        await send_response_with_media(bot, chat_id, final_text)
     else:
         # No images — do the normal final edit or send
         final_chunk = final_text[:4096]
@@ -481,33 +567,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text("Something went wrong while contacting Agent Zero.")
 
 
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not is_allowed(update.effective_user.id):
-        await update.message.reply_text("Sorry, you are not authorized to use this bot.")
-        return
-
+async def _handle_media(
+    update: Update, context: ContextTypes.DEFAULT_TYPE,
+    attachment: dict, caption_fallback: str,
+) -> None:
+    """Shared logic for forwarding a media attachment to Agent Zero."""
     chat_id = update.effective_chat.id
     ctx_id = context_id_for(chat_id)
     is_private = update.effective_chat.type == ChatType.PRIVATE
-
-    # Download the highest-resolution photo
-    photo = update.message.photo[-1]
-    try:
-        file = await photo.get_file()
-        photo_bytes = await file.download_as_bytearray()
-    except Exception:
-        logger.exception("Failed to download photo from Telegram")
-        await update.message.reply_text("Failed to download the photo. Please try again.")
-        return
-
-    # Encode as base64 data URI for Agent Zero
-    b64_data = base64.b64encode(photo_bytes).decode("utf-8")
-    attachment = {
-        "path": f"data:image/jpeg;base64,{b64_data}",
-        "name": f"photo_{photo.file_unique_id}.jpg",
-    }
-
-    user_text = update.message.caption or "(Photo sent)"
+    user_text = update.message.caption or caption_fallback
 
     await update.effective_chat.send_action("typing")
 
@@ -521,8 +589,77 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     except httpx.ConnectError:
         await update.message.reply_text("Cannot reach Agent Zero. Is the service running?")
     except Exception:
-        logger.exception("Error handling photo message")
+        logger.exception("Error handling media message")
         await update.message.reply_text("Something went wrong while contacting Agent Zero.")
+
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_allowed(update.effective_user.id):
+        await update.message.reply_text("Sorry, you are not authorized to use this bot.")
+        return
+
+    photo = update.message.photo[-1]
+    try:
+        file = await photo.get_file()
+        file_bytes = await file.download_as_bytearray()
+    except Exception:
+        logger.exception("Failed to download photo from Telegram")
+        await update.message.reply_text("Failed to download the photo. Please try again.")
+        return
+
+    b64_data = base64.b64encode(file_bytes).decode("utf-8")
+    attachment = {
+        "path": f"data:image/jpeg;base64,{b64_data}",
+        "name": f"photo_{photo.file_unique_id}.jpg",
+    }
+    await _handle_media(update, context, attachment, "(Photo sent)")
+
+
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_allowed(update.effective_user.id):
+        await update.message.reply_text("Sorry, you are not authorized to use this bot.")
+        return
+
+    doc = update.message.document
+    try:
+        file = await doc.get_file()
+        file_bytes = await file.download_as_bytearray()
+    except Exception:
+        logger.exception("Failed to download document from Telegram")
+        await update.message.reply_text("Failed to download the document. Please try again.")
+        return
+
+    b64_data = base64.b64encode(file_bytes).decode("utf-8")
+    mime_type = doc.mime_type or "application/octet-stream"
+    filename = doc.file_name or f"document_{doc.file_unique_id}"
+    attachment = {
+        "path": f"data:{mime_type};base64,{b64_data}",
+        "name": filename,
+    }
+    await _handle_media(update, context, attachment, f"(Document sent: {filename})")
+
+
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_allowed(update.effective_user.id):
+        await update.message.reply_text("Sorry, you are not authorized to use this bot.")
+        return
+
+    voice = update.message.voice
+    try:
+        file = await voice.get_file()
+        file_bytes = await file.download_as_bytearray()
+    except Exception:
+        logger.exception("Failed to download voice message from Telegram")
+        await update.message.reply_text("Failed to download the voice message. Please try again.")
+        return
+
+    b64_data = base64.b64encode(file_bytes).decode("utf-8")
+    mime_type = voice.mime_type or "audio/ogg"
+    attachment = {
+        "path": f"data:{mime_type};base64,{b64_data}",
+        "name": f"voice_{voice.file_unique_id}.ogg",
+    }
+    await _handle_media(update, context, attachment, "(Voice message sent)")
 
 
 def main() -> None:
@@ -532,6 +669,8 @@ def main() -> None:
     app.add_handler(CommandHandler("reset", reset_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+    app.add_handler(MessageHandler(filters.VOICE, handle_voice))
 
     logger.info("Telegram proxy bot starting (long-polling mode, streaming enabled)...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
