@@ -32,6 +32,11 @@ services:
       # Agent Zero URL (default works when service is named "agent-zero")
       - AGENT_ZERO_URL=http://agent-zero:80
 
+      # Agent Zero web UI credentials (needed for streaming via WebSocket)
+      # Must match AUTH_LOGIN / AUTH_PASSWORD on the agent-zero service
+      - AGENT_ZERO_LOGIN=admin
+      - AGENT_ZERO_PASSWORD=Test1234!
+
       # Optional — comma-separated Telegram user IDs allowed to use the bot
       # Leave empty to allow everyone (not recommended for public bots)
       # Find your ID by messaging @userinfobot on Telegram
