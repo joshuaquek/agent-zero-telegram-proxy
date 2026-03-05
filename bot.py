@@ -116,6 +116,14 @@ class AgentZeroClient:
                 json={"message": text, "context_id": context_id},
                 headers={"X-API-KEY": self.api_key},
             )
+            # If context not found, retry without context_id to auto-create
+            if response.status_code == 404 and context_id:
+                logger.info("Context %s not found, retrying without context_id", context_id)
+                response = await client.post(
+                    f"{self.base_url}/api_message",
+                    json={"message": text, "context_id": ""},
+                    headers={"X-API-KEY": self.api_key},
+                )
             response.raise_for_status()
             data = response.json()
         return data.get("response") or data.get("message") or str(data)
@@ -136,21 +144,29 @@ class AgentZeroClient:
             engineio_logger=False,
         )
 
-        # Get CSRF token for WebSocket handshake
+        # Get CSRF token and runtime_id for WebSocket handshake
         csrf_token = None
+        runtime_id = None
         try:
             resp = await http_client.get(f"{self.base_url}/csrf_token")
             if resp.status_code == 200:
                 csrf_data = resp.json()
                 csrf_token = csrf_data.get("token") or csrf_data.get("csrf_token")
+                runtime_id = csrf_data.get("runtime_id")
         except Exception:
             logger.debug("Could not fetch CSRF token, proceeding without it")
 
         # Build connection headers (pass cookies from authenticated session)
-        headers = {}
+        # Include the csrf_token cookie that Agent Zero's WebSocket middleware expects
+        # Include Origin header required by Agent Zero's WebSocket origin validation
+        headers = {"Origin": self.base_url}
+        cookie_parts = []
         if http_client.cookies:
-            cookie_str = "; ".join(f"{k}={v}" for k, v in http_client.cookies.items())
-            headers["Cookie"] = cookie_str
+            cookie_parts = [f"{k}={v}" for k, v in http_client.cookies.items()]
+        if csrf_token and runtime_id:
+            cookie_parts.append(f"csrf_token_{runtime_id}={csrf_token}")
+        if cookie_parts:
+            headers["Cookie"] = "; ".join(cookie_parts)
 
         auth = {}
         if csrf_token:
@@ -214,16 +230,29 @@ class AgentZeroClient:
             logger.warning("Failed to send state_request")
 
         # Queue and send the message via HTTP (web UI path)
+        # These endpoints require CSRF token (via header or cookie)
+        queue_headers = {"X-API-KEY": self.api_key}
+        if csrf_token:
+            queue_headers["X-CSRF-Token"] = csrf_token
         try:
+            # Ensure the context exists (create if needed)
+            resp = await http_client.post(
+                f"{self.base_url}/chat_create",
+                json={"new_context": context_id},
+                headers=queue_headers,
+            )
+            if resp.status_code == 200:
+                logger.debug("Context %s ensured via chat_create", context_id)
+
             await http_client.post(
                 f"{self.base_url}/message_queue_add",
                 json={"context": context_id, "text": text, "attachments": attachments or []},
-                headers={"X-API-KEY": self.api_key},
+                headers=queue_headers,
             )
             await http_client.post(
                 f"{self.base_url}/message_queue_send",
                 json={"context": context_id, "send_all": True},
-                headers={"X-API-KEY": self.api_key},
+                headers=queue_headers,
             )
         except Exception:
             logger.warning("message_queue path failed, trying /api_message via WebSocket fallback")
