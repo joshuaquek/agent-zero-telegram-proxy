@@ -96,8 +96,14 @@ class AgentZeroClient:
         if csrf_token:
             auth["csrf_token"] = csrf_token
 
+        # Track how many logs existed before we sent our message so we can
+        # ignore historical entries and only process the NEW response.
+        baseline_log_count: int | None = None
+
         @sio.on("state_push", namespace="/state_sync")
         async def on_state_push(data):
+            nonlocal baseline_log_count
+
             envelope = data if isinstance(data, dict) else {}
             snapshot = envelope.get("snapshot") or envelope.get("data", {}).get("snapshot", {})
             if not snapshot:
@@ -106,23 +112,40 @@ class AgentZeroClient:
 
             logs = snapshot.get("logs", [])
             log_active = snapshot.get("log_progress_active", True)
-            logger.info("[state_push] logs=%d, active=%s, types=%s",
-                        len(logs), log_active,
-                        [l.get("type") for l in logs])
-            response_parts = []
-            for log_item in logs:
+
+            # First push after subscribing: record how many historical logs
+            # exist so we skip them when looking for the current response.
+            if baseline_log_count is None:
+                baseline_log_count = len(logs)
+                logger.info("[state_push] baseline log count set to %d", baseline_log_count)
+                # Don't process this initial snapshot — it's history
+                if not log_active:
+                    # Edge case: agent already idle — no message in flight yet
+                    pass
+                return
+
+            # Only look at logs AFTER the baseline (i.e. new logs from our message)
+            new_logs = logs[baseline_log_count:]
+            logger.info("[state_push] total_logs=%d, new=%d, active=%s, new_types=%s",
+                        len(logs), len(new_logs), log_active,
+                        [l.get("type") for l in new_logs])
+
+            # Extract the LAST response content from new logs only
+            latest_response = ""
+            for log_item in reversed(new_logs):
                 if log_item.get("type") == "response":
                     content = log_item.get("content", "")
                     if content:
-                        response_parts.append(content)
-                        logger.info("[state_push] response chunk (%d chars): %s",
-                                    len(content), content[:200])
+                        latest_response = content
+                        break
 
-            if response_parts:
-                stream_state.response_text = "\n\n".join(response_parts)
+            if latest_response:
+                logger.info("[state_push] response (%d chars): %s",
+                            len(latest_response), latest_response[:200])
+                stream_state.response_text = latest_response
                 stream_state.event.set()
 
-            if not log_active:
+            if not log_active and new_logs:
                 stream_state.is_done = True
                 logger.info("[state_push] Agent done, final text (%d chars)", len(stream_state.response_text))
                 stream_state.event.set()
