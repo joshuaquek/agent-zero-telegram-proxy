@@ -66,7 +66,7 @@ export AGENT_ZERO_URL="http://localhost:50080"  # Agent Zero must be accessible
 export ALLOWED_TELEGRAM_USER_IDS="your-user-id"
 
 # 4. Run
-python bot.py
+python src/bot.py
 ```
 
 Note: When running outside Docker, `AGENT_ZERO_URL` should point to `http://localhost:50080` (or wherever Agent Zero is accessible from your machine), not `http://agent-zero:80` (which only works inside the Docker network).

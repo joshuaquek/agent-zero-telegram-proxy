@@ -5,7 +5,7 @@
 - **Base image**: `python:3.12-slim`
 - **Published to**: `opendigitalsociety/agent-zero-telegram-proxy` on Docker Hub
 - **Dependencies**: `python-telegram-bot ~=22.6`, `httpx ~=0.28`, `python-socketio[asyncio_client] ~=5.12`
-- **Entrypoint**: `python bot.py`
+- **Entrypoint**: `python src/bot.py`
 - **Exposed ports**: None (outbound connections only)
 
 ## Environment Variables

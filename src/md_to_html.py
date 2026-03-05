@@ -233,7 +233,7 @@ def md_to_tg_html(text: str) -> str:
 
         return out.strip()
     except Exception:
-        logger.debug("Markdown->HTML conversion failed, falling back to escaped plain text")
+        logger.exception("Markdown->HTML conversion failed, falling back to escaped plain text")
         return html_mod.escape(text)
 
 

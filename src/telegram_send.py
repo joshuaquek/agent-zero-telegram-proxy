@@ -51,11 +51,17 @@ def split_html_chunks(html_text: str, max_len: int = 4096) -> list[str]:
     return chunks
 
 
-async def send_html_message(bot, chat_id: int, text: str, **kwargs):
-    """Send a single message with parse_mode=HTML, falling back to plain text on error."""
+async def send_html_message(bot, chat_id: int, text: str, *, draft_id: int | None = None):
+    """Send a single message with parse_mode=HTML, falling back to plain text on error.
+
+    *draft_id* is passed via ``api_kwargs`` so Telegram replaces the streaming
+    draft preview with the final message (Bot API 9.5+).
+    """
+    api_kw = {"draft_id": draft_id} if draft_id else None
     try:
         msg = await bot.send_message(
-            chat_id=chat_id, text=text, parse_mode=ParseMode.HTML, **kwargs,
+            chat_id=chat_id, text=text, parse_mode=ParseMode.HTML,
+            api_kwargs=api_kw,
         )
         logger.info("[send_html] OK, sent %d chars with HTML parse_mode", len(text))
         return msg
@@ -63,9 +69,7 @@ async def send_html_message(bot, chat_id: int, text: str, **kwargs):
         logger.warning("[send_html] HTML send failed (%s), falling back to plain text. Text sample: %s",
                        exc, text[:200])
         try:
-            # Remove draft_id from fallback since it's HTML-specific
-            fallback_kwargs = {k: v for k, v in kwargs.items() if k != "draft_id"}
-            return await bot.send_message(chat_id=chat_id, text=text, **fallback_kwargs)
+            return await bot.send_message(chat_id=chat_id, text=text)
         except Exception:
             logger.exception("Plain text send also failed")
             return None
@@ -101,5 +105,4 @@ async def send_html_chunks(
     """
     chunks = split_html_chunks(html_text)
     for i, chunk in enumerate(chunks):
-        extra = {"draft_id": draft_id} if draft_id and i == 0 else {}
-        await send_html_message(bot, chat_id, chunk, **extra)
+        await send_html_message(bot, chat_id, chunk, draft_id=draft_id if i == 0 else None)
