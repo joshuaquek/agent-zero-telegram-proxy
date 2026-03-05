@@ -268,6 +268,124 @@ def _md_to_tg_html(text: str) -> str:
         return html_mod.escape(text)
 
 
+def _split_html_chunks(html_text: str, max_len: int = 4096) -> list[str]:
+    """Split HTML text into chunks that respect Telegram's size limit.
+
+    Avoids splitting inside HTML tags or entities.  Falls back to hard
+    truncation only as a last resort.
+    """
+    if len(html_text) <= max_len:
+        return [html_text] if html_text.strip() else []
+
+    chunks: list[str] = []
+    remaining = html_text
+    while remaining:
+        if len(remaining) <= max_len:
+            if remaining.strip():
+                chunks.append(remaining)
+            break
+
+        # Find a safe split point: prefer newline, then space, before max_len
+        cut = remaining.rfind("\n", 0, max_len)
+        if cut <= 0:
+            cut = remaining.rfind(" ", 0, max_len)
+        if cut <= 0:
+            cut = max_len
+
+        # Make sure we don't cut inside an HTML tag
+        open_angle = remaining.rfind("<", 0, cut)
+        close_angle = remaining.rfind(">", 0, cut)
+        if open_angle > close_angle:
+            # We're inside a tag — back up to before it
+            cut = open_angle
+
+        # Also avoid cutting inside an HTML entity (&amp; etc.)
+        amp = remaining.rfind("&", max(0, cut - 10), cut)
+        if amp != -1 and ";" not in remaining[amp:cut]:
+            cut = amp
+
+        chunk = remaining[:cut]
+        if chunk.strip():
+            chunks.append(chunk)
+        remaining = remaining[cut:].lstrip("\n")
+
+    return chunks
+
+
+async def _send_html_message(bot, chat_id: int, text: str, **kwargs) -> "telegram.Message | None":
+    """Send a single message with parse_mode=HTML, falling back to plain text on error."""
+    try:
+        return await bot.send_message(
+            chat_id=chat_id, text=text, parse_mode=ParseMode.HTML, **kwargs,
+        )
+    except Exception:
+        logger.warning("HTML send failed, falling back to plain text")
+        try:
+            return await bot.send_message(chat_id=chat_id, text=text, **kwargs)
+        except Exception:
+            logger.exception("Plain text send also failed")
+            return None
+
+
+async def _edit_html_message(bot, chat_id: int, message_id: int, text: str, **kwargs) -> bool:
+    """Edit a message with parse_mode=HTML, falling back to plain text on error."""
+    try:
+        await bot.edit_message_text(
+            chat_id=chat_id, message_id=message_id,
+            text=text, parse_mode=ParseMode.HTML, **kwargs,
+        )
+        return True
+    except Exception:
+        logger.warning("HTML edit failed, falling back to plain text")
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id, message_id=message_id, text=text, **kwargs,
+            )
+            return True
+        except Exception:
+            logger.debug("Plain text edit also failed")
+            return False
+
+
+async def _send_html_chunks(bot, chat_id: int, html_text: str) -> None:
+    """Split HTML into safe chunks and send each one."""
+    for chunk in _split_html_chunks(html_text):
+        await _send_html_message(bot, chat_id, chunk)
+
+
+def _has_balanced_tags(text: str) -> bool:
+    """Check whether all HTML tags in *text* are properly opened and closed.
+
+    Returns True when every ``<tag>`` has a matching ``</tag>`` in the
+    correct nesting order. Self-closing tags are ignored.
+    """
+    tag_re = re.compile(r"<(/?)(\w+)[^>]*?>")
+    stack: list[str] = []
+    for m in tag_re.finditer(text):
+        is_close, tag_name = m.group(1), m.group(2).lower()
+        if is_close:
+            if not stack or stack[-1] != tag_name:
+                return False
+            stack.pop()
+        else:
+            stack.append(tag_name)
+    return len(stack) == 0
+
+
+def _safe_md_to_tg_html(text: str) -> tuple[str, bool]:
+    """Convert markdown to Telegram HTML only if the result has balanced tags.
+
+    Returns ``(converted_text, used_html)`` — *used_html* is ``True`` when
+    the HTML conversion succeeded and the tags are balanced (safe to send
+    with ``parse_mode=HTML``), ``False`` when the caller should send as
+    plain text instead.
+    """
+    html_text = _md_to_tg_html(text)
+    if _has_balanced_tags(html_text):
+        return html_text, True
+    return text, False
+
+
 def _url_extension(url: str) -> str:
     """Return the lowercase file extension from a URL, ignoring query params."""
     path = url.split('?')[0].split('#')[0]
@@ -671,13 +789,12 @@ async def send_response_with_media(bot, chat_id: int, text: str) -> None:
         except Exception:
             logger.exception("Failed to send %s %s, sending as text link", item.kind, resolved_url)
             link_html = f'<a href="{html_mod.escape(resolved_url)}">{html_mod.escape(item.alt or item.kind)}</a>'
-            await bot.send_message(chat_id=chat_id, text=link_html, parse_mode=ParseMode.HTML)
+            await _send_html_message(bot, chat_id, link_html)
 
     # Send remaining text with Telegram HTML formatting
     if cleaned_text:
         formatted = _md_to_tg_html(cleaned_text)
-        for i in range(0, len(formatted), 4096):
-            await bot.send_message(chat_id=chat_id, text=formatted[i : i + 4096], parse_mode=ParseMode.HTML)
+        await _send_html_chunks(bot, chat_id, formatted)
 
 
 # ---------------------------------------------------------------------------
@@ -730,16 +847,15 @@ async def _stream_to_private_chat(
             if now - last_draft_time < throttle_sec:
                 continue
 
-            # Send draft (truncate to 4096 for Telegram limit)
-            draft_html = _md_to_tg_html(response_text)[:4096]
-            if draft_html.strip():
+            # Send draft — convert to HTML only if tags are balanced
+            draft_converted, draft_is_html = _safe_md_to_tg_html(response_text)
+            draft_text = draft_converted[:4096]
+            if draft_text.strip():
                 try:
-                    await bot.send_message_draft(
-                        chat_id=chat_id,
-                        draft_id=draft_id,
-                        text=draft_html,
-                        parse_mode=ParseMode.HTML,
-                    )
+                    kwargs = {"chat_id": chat_id, "draft_id": draft_id, "text": draft_text}
+                    if draft_is_html:
+                        kwargs["parse_mode"] = ParseMode.HTML
+                    await bot.send_message_draft(**kwargs)
                     last_draft_time = time.monotonic()
                 except Exception:
                     logger.debug("send_message_draft failed, continuing")
@@ -775,23 +891,23 @@ async def _stream_to_group_chat(
             if now - last_edit_time < edit_throttle_sec:
                 continue
 
-            preview_html = _md_to_tg_html(response_text)[:4096]
-            if not preview_html.strip():
+            preview_converted, preview_is_html = _safe_md_to_tg_html(response_text)
+            preview_text = preview_converted[:4096]
+            if not preview_text.strip():
                 continue
 
+            parse_kw = {"parse_mode": ParseMode.HTML} if preview_is_html else {}
             try:
                 if sent_message is None:
-                    sent_message = await bot.send_message(chat_id=chat_id, text=preview_html, parse_mode=ParseMode.HTML)
+                    sent_message = await bot.send_message(chat_id=chat_id, text=preview_text, **parse_kw)
                 else:
                     await bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=sent_message.message_id,
-                        text=preview_html,
-                        parse_mode=ParseMode.HTML,
+                        chat_id=chat_id, message_id=sent_message.message_id,
+                        text=preview_text, **parse_kw,
                     )
                 last_edit_time = time.monotonic()
             except Exception:
-                logger.debug("edit_message_text failed, continuing")
+                logger.debug("preview message send/edit failed, continuing")
 
     except Exception:
         logger.exception("Streaming failed")
@@ -814,22 +930,17 @@ async def _stream_to_group_chat(
     else:
         # No images — do the normal final edit or send
         final_html = _md_to_tg_html(final_text)
-        final_chunk = final_html[:4096]
-        try:
-            if sent_message is None:
-                await bot.send_message(chat_id=chat_id, text=final_chunk, parse_mode=ParseMode.HTML)
+        chunks = _split_html_chunks(final_html)
+        if chunks:
+            first_chunk = chunks[0]
+            if sent_message is not None:
+                ok = await _edit_html_message(bot, chat_id, sent_message.message_id, first_chunk)
+                if not ok:
+                    await _send_html_message(bot, chat_id, first_chunk)
             else:
-                await bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=sent_message.message_id,
-                    text=final_chunk,
-                    parse_mode=ParseMode.HTML,
-                )
-        except Exception:
-            await bot.send_message(chat_id=chat_id, text=final_chunk, parse_mode=ParseMode.HTML)
-
-        for i in range(4096, len(final_html), 4096):
-            await bot.send_message(chat_id=chat_id, text=final_html[i : i + 4096], parse_mode=ParseMode.HTML)
+                await _send_html_message(bot, chat_id, first_chunk)
+            for chunk in chunks[1:]:
+                await _send_html_message(bot, chat_id, chunk)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
