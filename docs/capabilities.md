@@ -2,8 +2,12 @@
 
 ## What the Bot Can Do
 
-### Real-Time Streaming
-The bot streams Agent Zero's response to you in real-time as it's being generated. In **private chats**, it uses Telegram's native `sendMessageDraft` API — you see text appearing smoothly in a draft bubble, just like watching someone type. In **group chats**, it sends a message and edits it progressively as more text arrives. When the agent finishes, the final message replaces the draft/preview.
+### Real-Time Streaming (Default)
+Streaming is the **default and primary** communication path — there is no flag to enable it. The bot always attempts to stream Agent Zero's response in real-time using the WebSocket `/state_sync` namespace. It only falls back to the blocking API if the WebSocket connection fails.
+
+In **private chats**, it uses Telegram's native `sendMessageDraft` API — you see text appearing smoothly in a draft bubble, just like watching someone type. In **group chats**, it sends a message and edits it progressively as more text arrives. When the agent finishes, the final message replaces the draft/preview.
+
+For the full streaming protocol, API reference, and integration details, see the [Streaming Integration Guide](streaming-integration.md).
 
 ### Message Forwarding
 Every text message you send to the Telegram bot is forwarded to Agent Zero. The agent's full response is sent back to you in Telegram. Long responses (over 4096 characters) are automatically split into multiple messages.
@@ -27,15 +31,17 @@ Restrict bot access to specific Telegram users via an allowlist of user IDs. Una
 ### Typing Indicator
 While Agent Zero is processing your message, the bot shows a "typing..." indicator in Telegram so you know it's working.
 
-## How Streaming Works
+## How Streaming Works (Default Behavior)
+
+Streaming is always attempted first. See the [Streaming Integration Guide](streaming-integration.md) for the full protocol specification.
 
 ### Private Chats (sendMessageDraft)
 
 ```
 User sends message
-  → Bot queues message to Agent Zero
-  → Bot subscribes to Agent Zero's WebSocket for state updates
-  → As the agent generates text, each chunk triggers a sendMessageDraft call
+  → Bot queues message via POST /message_queue_add + /message_queue_send
+  → Bot connects to Agent Zero's WebSocket (/state_sync namespace)
+  → As the agent generates text, each state_push triggers a sendMessageDraft call
   → Telegram natively animates the growing text in a draft bubble
   → When the agent finishes, bot sends the final message (draft disappears)
 ```
@@ -48,8 +54,8 @@ User sends message
 
 ```
 User sends message
-  → Bot queues message to Agent Zero
-  → Bot subscribes to Agent Zero's WebSocket for state updates
+  → Bot queues message via POST /message_queue_add + /message_queue_send
+  → Bot connects to Agent Zero's WebSocket (/state_sync namespace)
   → First chunk: bot sends a new message
   → Subsequent chunks: bot edits that message with the growing text
   → When the agent finishes, bot does a final edit with the complete response
@@ -60,7 +66,7 @@ User sends message
 
 ### Fallback (No WebSocket)
 
-If the WebSocket connection to Agent Zero fails, the bot automatically falls back to the blocking `POST /api_message` endpoint — the same behavior as before streaming was added. The user simply waits for the full response instead of seeing it stream.
+If the WebSocket connection to Agent Zero fails (typically due to missing or incorrect `AGENT_ZERO_LOGIN` / `AGENT_ZERO_PASSWORD`), the bot automatically falls back to the blocking `POST /api_message` endpoint. The user simply waits for the full response instead of seeing it stream. To ensure streaming works, verify that these credentials match your Agent Zero instance's `AUTH_LOGIN` and `AUTH_PASSWORD`.
 
 ## Agent Zero API Endpoints Used
 

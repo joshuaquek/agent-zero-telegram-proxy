@@ -2,13 +2,13 @@
 
 ## Overview
 
-The Telegram proxy is a lightweight Python service that bridges Telegram's Bot API with Agent Zero's REST + WebSocket APIs. It runs as a Docker container alongside Agent Zero on the same Docker network. It supports text, photos, documents, and voice messages in both directions.
+The Telegram proxy is a lightweight Python service that bridges Telegram's Bot API with Agent Zero's REST + WebSocket APIs. It **streams responses by default** using Agent Zero's Socket.IO WebSocket. It runs as a Docker container alongside Agent Zero on the same Docker network and supports text, photos, documents, and voice messages in both directions.
 
 ```
                     Internet                          Docker Network (proxy-net)
                        |                                       |
-  Telegram User ──► Telegram Bot API ──► telegram-proxy ──► agent-zero:80
-                                          (long-polling)     (REST + WebSocket)
+  Telegram User ──► Telegram Bot API ──► telegram-proxy ──WebSocket──► agent-zero:80
+                                          (long-polling)     (streaming via /state_sync)
 ```
 
 ## How It Works
@@ -16,8 +16,8 @@ The Telegram proxy is a lightweight Python service that bridges Telegram's Bot A
 1. The bot connects to Telegram using **long polling** — it continuously asks Telegram's servers for new messages. No public URL or HTTPS certificate is needed.
 
 2. When a user sends a text message, photo, document, or voice message, the bot forwards it to Agent Zero:
-   - **Streaming path (primary)**: Queues the message via `POST /message_queue_add` and `POST /message_queue_send`, then subscribes to Agent Zero's Socket.IO WebSocket (`/state_sync` namespace) to receive the response in real-time as it's generated.
-   - **Blocking path (fallback)**: If the WebSocket connection fails, falls back to `POST /api_message` which returns the full response in one shot.
+   - **Streaming path (default)**: Queues the message via `POST /message_queue_add` and `POST /message_queue_send`, then connects to Agent Zero's Socket.IO WebSocket (`/state_sync` namespace) to receive the response in real-time as it's generated. This is always attempted first.
+   - **Blocking path (automatic fallback)**: If the WebSocket connection fails (e.g., wrong credentials), falls back to `POST /api_message` which returns the full response in one shot.
 
 3. Media attachments (photos, documents, voice messages) are base64-encoded and sent via the `attachments` field in `/message_queue_add`.
 
@@ -47,8 +47,9 @@ The Telegram proxy is a lightweight Python service that bridges Telegram's Bot A
    (api.telegram.org)
 ```
 
-- **telegram-proxy** does not expose any ports to the host. It only makes outbound connections: to Telegram's API (internet) and to Agent Zero (Docker network).
+- **telegram-proxy** does not expose any ports to the host. It only makes outbound connections: to Telegram's API (internet) and to Agent Zero (Docker network via HTTP + WebSocket).
 - **agent-zero** exposes port 50080 for the web UI, but the proxy communicates with it internally on port 80.
+- **Streaming** uses the same WebSocket protocol as Agent Zero's own web UI (`/state_sync` namespace). See the [Streaming Integration Guide](streaming-integration.md) for the full protocol specification.
 
 ## Conversation Mapping
 

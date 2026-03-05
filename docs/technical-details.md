@@ -15,8 +15,8 @@
 | `TELEGRAM_BOT_TOKEN` | Yes | — | Bot token from [@BotFather](https://t.me/BotFather) |
 | `AGENT_ZERO_API_KEY` | Yes | — | API key from Agent Zero Settings > External Services |
 | `AGENT_ZERO_URL` | No | `http://agent-zero:80` | Agent Zero API base URL |
-| `AGENT_ZERO_LOGIN` | No | `admin` | Agent Zero web UI username (for WebSocket auth) |
-| `AGENT_ZERO_PASSWORD` | No | (empty) | Agent Zero web UI password (for WebSocket auth) |
+| `AGENT_ZERO_LOGIN` | **Yes for streaming** | `admin` | Agent Zero web UI username — must match `AUTH_LOGIN` on agent-zero |
+| `AGENT_ZERO_PASSWORD` | **Yes for streaming** | (empty) | Agent Zero web UI password — must match `AUTH_PASSWORD` on agent-zero |
 | `ALLOWED_TELEGRAM_USER_IDS` | No | (empty = allow all) | Comma-separated Telegram user IDs |
 | `REQUEST_TIMEOUT_SECONDS` | No | `120` | Timeout for Agent Zero API calls (seconds) |
 | `DRAFT_THROTTLE_MS` | No | `200` | Minimum interval between `sendMessageDraft` updates (ms) |
@@ -53,9 +53,9 @@ To find your Telegram user ID, message [@userinfobot](https://t.me/userinfobot) 
 
 If this variable is empty or unset, all users are allowed (not recommended for public bots).
 
-## WebSocket Streaming Architecture
+## WebSocket Streaming Architecture (Default Behavior)
 
-The bot uses Agent Zero's Socket.IO WebSocket (the same protocol the web UI uses) to receive real-time response updates:
+Streaming is the **default and primary** communication path. The bot uses Agent Zero's Socket.IO WebSocket (the same protocol the web UI uses) to receive real-time response updates. For the full protocol specification, see the [Streaming Integration Guide](streaming-integration.md).
 
 1. **Connect** to the `/state_sync` namespace with session cookies + CSRF token
 2. **Subscribe** by emitting `state_request` with the conversation's `context_id`

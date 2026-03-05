@@ -1,5 +1,9 @@
 # Example: Adding the Telegram proxy to your existing Agent Zero docker-compose setup.
 #
+# Streaming is the DEFAULT — responses are streamed to Telegram in real-time via WebSocket.
+# For streaming to work, AGENT_ZERO_LOGIN and AGENT_ZERO_PASSWORD on the proxy must match
+# AUTH_LOGIN and AUTH_PASSWORD on the agent-zero service.
+#
 # Copy the "telegram-proxy" service block into your own compose.yml.
 # Make sure your Agent Zero service is named "agent-zero" (or update AGENT_ZERO_URL).
 
@@ -32,8 +36,8 @@ services:
       # Agent Zero URL (default works when service is named "agent-zero")
       - AGENT_ZERO_URL=http://agent-zero:80
 
-      # Agent Zero web UI credentials (needed for streaming via WebSocket)
-      # Must match AUTH_LOGIN / AUTH_PASSWORD on the agent-zero service
+      # Streaming credentials (REQUIRED for real-time streaming, which is the default)
+      # Must match AUTH_LOGIN / AUTH_PASSWORD on the agent-zero service above
       - AGENT_ZERO_LOGIN=admin
       - AGENT_ZERO_PASSWORD=Test1234!
 
