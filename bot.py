@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import html as html_mod
 import logging
 import os
 import re
@@ -8,8 +9,9 @@ from dataclasses import dataclass, field
 
 import httpx
 import socketio
+from chatgpt_md_converter import telegram_format
 from telegram import Update
-from telegram.constants import ChatType
+from telegram.constants import ChatType, ParseMode
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -31,6 +33,19 @@ _DOCUMENT_EXTENSIONS = {
     '.txt', '.csv', '.zip', '.tar', '.gz', '.7z', '.rar',
     '.json', '.xml', '.yaml', '.yml', '.py', '.js', '.ts', '.html', '.css',
 }
+
+
+def _md_to_tg_html(text: str) -> str:
+    """Convert markdown text to Telegram-compatible HTML.
+
+    Uses chatgpt-md-converter for the heavy lifting, with a fallback
+    to HTML-escaped plain text if conversion fails.
+    """
+    try:
+        return telegram_format(text)
+    except Exception:
+        logger.debug("telegram_format failed, falling back to escaped plain text")
+        return html_mod.escape(text)
 
 
 def _url_extension(url: str) -> str:
@@ -178,24 +193,32 @@ class AgentZeroClient:
             # data might be the envelope itself or nested under "data"
             snapshot = envelope.get("snapshot") or envelope.get("data", {}).get("snapshot", {})
             if not snapshot:
+                logger.debug("[state_push] No snapshot in envelope")
                 return
 
             # Extract response text from logs
             logs = snapshot.get("logs", [])
+            log_active = snapshot.get("log_progress_active", True)
+            logger.info("[state_push] logs=%d, active=%s, types=%s",
+                        len(logs), log_active,
+                        [l.get("type") for l in logs])
             response_parts = []
             for log_item in logs:
                 if log_item.get("type") == "response":
                     content = log_item.get("content", "")
                     if content:
                         response_parts.append(content)
+                        logger.info("[state_push] response chunk (%d chars): %s",
+                                    len(content), content[:200])
 
             if response_parts:
                 stream_state.response_text = "\n\n".join(response_parts)
                 stream_state.event.set()
 
             # Check if agent is done
-            if not snapshot.get("log_progress_active", True):
+            if not log_active:
                 stream_state.is_done = True
+                logger.info("[state_push] Agent done, final text (%d chars)", len(stream_state.response_text))
                 stream_state.event.set()
 
         # Connect to Socket.IO
@@ -384,9 +407,23 @@ def _resolve_url(url: str) -> str:
 
 
 async def _download_file(url: str) -> bytes:
-    """Download a file from a URL and return its bytes."""
+    """Download a file from a URL and return its bytes.
+
+    For URLs pointing to Agent Zero, authenticates first to access protected files.
+    """
     async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(url)
+        # Authenticate if the URL points to our Agent Zero instance
+        resolved = _resolve_url(url)
+        if resolved.startswith(AGENT_ZERO_URL) and AGENT_ZERO_LOGIN and AGENT_ZERO_PASSWORD:
+            try:
+                await client.post(
+                    f"{AGENT_ZERO_URL}/login",
+                    data={"username": AGENT_ZERO_LOGIN, "password": AGENT_ZERO_PASSWORD},
+                    follow_redirects=True,
+                )
+            except Exception:
+                logger.debug("Login for file download failed, trying without auth")
+        resp = await client.get(resolved)
         resp.raise_for_status()
         return resp.content
 
@@ -396,10 +433,10 @@ async def send_response_with_media(bot, chat_id: int, text: str) -> None:
     cleaned_text, media_items = extract_media_from_response(text)
 
     for item in media_items:
-        url = _resolve_url(item.url)
+        resolved_url = _resolve_url(item.url)
         caption = item.alt if item.alt else None
         try:
-            file_bytes = await _download_file(url)
+            file_bytes = await _download_file(item.url)
             if item.kind == "image":
                 await bot.send_photo(chat_id=chat_id, photo=file_bytes, caption=caption)
             elif item.kind == "voice":
@@ -412,13 +449,15 @@ async def send_response_with_media(bot, chat_id: int, text: str) -> None:
                 await bot.send_document(chat_id=chat_id, document=file_bytes,
                                         filename=filename, caption=caption)
         except Exception:
-            logger.warning("Failed to send %s %s, sending as text link", item.kind, url)
-            await bot.send_message(chat_id=chat_id, text=f"[{item.alt or item.kind}: {url}]({url})")
+            logger.exception("Failed to send %s %s, sending as text link", item.kind, resolved_url)
+            link_html = f'<a href="{html_mod.escape(resolved_url)}">{html_mod.escape(item.alt or item.kind)}</a>'
+            await bot.send_message(chat_id=chat_id, text=link_html, parse_mode=ParseMode.HTML)
 
-    # Send remaining text
+    # Send remaining text with Telegram HTML formatting
     if cleaned_text:
-        for i in range(0, len(cleaned_text), 4096):
-            await bot.send_message(chat_id=chat_id, text=cleaned_text[i : i + 4096])
+        formatted = _md_to_tg_html(cleaned_text)
+        for i in range(0, len(formatted), 4096):
+            await bot.send_message(chat_id=chat_id, text=formatted[i : i + 4096], parse_mode=ParseMode.HTML)
 
 
 # ---------------------------------------------------------------------------
@@ -472,13 +511,14 @@ async def _stream_to_private_chat(
                 continue
 
             # Send draft (truncate to 4096 for Telegram limit)
-            draft_text = response_text[:4096]
-            if draft_text.strip():
+            draft_html = _md_to_tg_html(response_text)[:4096]
+            if draft_html.strip():
                 try:
                     await bot.send_message_draft(
                         chat_id=chat_id,
                         draft_id=draft_id,
-                        text=draft_text,
+                        text=draft_html,
+                        parse_mode=ParseMode.HTML,
                     )
                     last_draft_time = time.monotonic()
                 except Exception:
@@ -515,18 +555,19 @@ async def _stream_to_group_chat(
             if now - last_edit_time < edit_throttle_sec:
                 continue
 
-            preview_text = response_text[:4096]
-            if not preview_text.strip():
+            preview_html = _md_to_tg_html(response_text)[:4096]
+            if not preview_html.strip():
                 continue
 
             try:
                 if sent_message is None:
-                    sent_message = await bot.send_message(chat_id=chat_id, text=preview_text)
+                    sent_message = await bot.send_message(chat_id=chat_id, text=preview_html, parse_mode=ParseMode.HTML)
                 else:
                     await bot.edit_message_text(
                         chat_id=chat_id,
                         message_id=sent_message.message_id,
-                        text=preview_text,
+                        text=preview_html,
+                        parse_mode=ParseMode.HTML,
                     )
                 last_edit_time = time.monotonic()
             except Exception:
@@ -552,21 +593,23 @@ async def _stream_to_group_chat(
         await send_response_with_media(bot, chat_id, final_text)
     else:
         # No images — do the normal final edit or send
-        final_chunk = final_text[:4096]
+        final_html = _md_to_tg_html(final_text)
+        final_chunk = final_html[:4096]
         try:
             if sent_message is None:
-                await bot.send_message(chat_id=chat_id, text=final_chunk)
+                await bot.send_message(chat_id=chat_id, text=final_chunk, parse_mode=ParseMode.HTML)
             else:
                 await bot.edit_message_text(
                     chat_id=chat_id,
                     message_id=sent_message.message_id,
                     text=final_chunk,
+                    parse_mode=ParseMode.HTML,
                 )
         except Exception:
-            await bot.send_message(chat_id=chat_id, text=final_chunk)
+            await bot.send_message(chat_id=chat_id, text=final_chunk, parse_mode=ParseMode.HTML)
 
-        for i in range(4096, len(final_text), 4096):
-            await bot.send_message(chat_id=chat_id, text=final_text[i : i + 4096])
+        for i in range(4096, len(final_html), 4096):
+            await bot.send_message(chat_id=chat_id, text=final_html[i : i + 4096], parse_mode=ParseMode.HTML)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

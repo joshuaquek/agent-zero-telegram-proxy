@@ -1,3 +1,4 @@
 python-telegram-bot~=22.6
 httpx~=0.28
 python-socketio[asyncio_client]~=5.12
+chatgpt-md-converter~=0.3
