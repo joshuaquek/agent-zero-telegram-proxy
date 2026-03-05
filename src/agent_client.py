@@ -124,6 +124,11 @@ class AgentZeroClient:
                     pass
                 return
 
+            # If the snapshot now has fewer logs than our baseline, the server
+            # switched to a per-turn view — reset baseline so we see all logs.
+            if len(logs) < baseline_log_count:
+                baseline_log_count = 0
+
             # Only look at logs AFTER the baseline (i.e. new logs from our message)
             new_logs = logs[baseline_log_count:]
             logger.info("[state_push] total_logs=%d, new=%d, active=%s, new_types=%s",
@@ -145,7 +150,7 @@ class AgentZeroClient:
                 stream_state.response_text = latest_response
                 stream_state.event.set()
 
-            if not log_active and new_logs:
+            if not log_active:
                 stream_state.is_done = True
                 logger.info("[state_push] Agent done, final text (%d chars)", len(stream_state.response_text))
                 stream_state.event.set()
