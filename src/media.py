@@ -124,6 +124,9 @@ async def send_response_with_media(
     that Telegram replaces the streaming draft preview with the final message.
     """
     cleaned_text, media_items = extract_media_from_response(text)
+    if len(cleaned_text) != len(text.strip()):
+        logger.warning("[send_response_with_media] text shrunk: input=%d, cleaned=%d, media=%d items, tail=%r",
+                       len(text), len(cleaned_text), len(media_items), text[len(cleaned_text):len(cleaned_text)+100])
 
     for item in media_items:
         resolved_url = _resolve_url(item.url)

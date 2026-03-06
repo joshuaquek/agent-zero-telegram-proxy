@@ -236,6 +236,10 @@ class AgentZeroClient:
                     yield current_text, stream_state.is_done
 
                 if stream_state.is_done:
+                    # Re-read in case response was updated while consumer processed the yield
+                    final = stream_state.response_text
+                    if final != last_text:
+                        yield final, True
                     break
 
             if not stream_state.is_done and last_text:

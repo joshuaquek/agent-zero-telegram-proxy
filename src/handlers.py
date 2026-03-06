@@ -98,6 +98,7 @@ async def _stream_to_private_chat(
     if not final_text or not final_text.strip():
         final_text = "(Agent Zero returned an empty response.)"
 
+    logger.info("[final_text] len=%d, tail=%r", len(final_text), final_text[-80:] if len(final_text) > 80 else final_text)
     await send_response_with_media(bot, chat_id, final_text, draft_id=draft_id)
 
 
