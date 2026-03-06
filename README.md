@@ -75,15 +75,17 @@ Now message your bot on Telegram — you'll see Agent Zero's response **streamin
 
 ```
 1. User sends message to Telegram bot
-2. Proxy queues message via POST /message_queue_add
-3. Proxy triggers processing via POST /message_queue_send
-4. Proxy connects to Agent Zero's WebSocket (/state_sync namespace)
-5. Agent Zero pushes state_push events as it generates text
-6. Proxy forwards each chunk to Telegram in real-time
-7. When agent finishes, proxy sends the final formatted message
+2. Proxy authenticates with Agent Zero (POST /login + GET /csrf_token)
+3. Proxy connects to Agent Zero's WebSocket (/state_sync namespace)
+4. Proxy ensures context exists via POST /chat_create
+5. Proxy queues message via POST /message_queue_add
+6. Proxy triggers processing via POST /message_queue_send
+7. Agent Zero pushes state_push events as it generates text
+8. Proxy forwards each chunk to Telegram in real-time
+9. When agent finishes, proxy sends the final formatted message with media
 ```
 
-The proxy authenticates the WebSocket connection using session cookies from `POST /login` and a CSRF token from `GET /csrf_token`. This is why `AGENT_ZERO_LOGIN` and `AGENT_ZERO_PASSWORD` are needed.
+The proxy authenticates the WebSocket connection using session cookies from `POST /login` and a CSRF token from `GET /csrf_token`. The CSRF token is also sent as an `X-CSRF-Token` header on HTTP requests to `/chat_create`, `/message_queue_add`, and `/message_queue_send`. This is why `AGENT_ZERO_LOGIN` and `AGENT_ZERO_PASSWORD` are needed.
 
 If the WebSocket connection fails for any reason, the proxy transparently falls back to the blocking `POST /api_message` endpoint — the user simply waits for the complete response instead of seeing it stream.
 
@@ -95,6 +97,13 @@ See the [Streaming Integration Guide](docs/streaming-integration.md) for the ful
 |----------|-------------|
 | `/start` | Shows a welcome message |
 | `/reset` | Clears conversation history and starts fresh |
+
+## Media Support
+
+The bot handles media in both directions:
+
+- **Incoming**: Send photos, documents, or voice messages to the bot — they are base64-encoded and forwarded to Agent Zero as attachments.
+- **Outgoing**: When Agent Zero's response contains markdown media references (`![alt](url)` or `[text](url)`), the bot downloads and sends them as native Telegram photos, documents, voice messages, or audio files. If a download fails, a clickable link is sent instead.
 
 ## Environment Variables
 

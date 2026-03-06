@@ -6,6 +6,28 @@
 - A Telegram account
 - An Agent Zero instance (either local or via the included docker-compose)
 
+## Project Structure
+
+```
+agent-zero-telegram-proxy/
+  src/
+    bot.py              # Entrypoint — registers handlers, starts polling
+    config.py           # Environment variable loading and helpers
+    handlers.py         # Telegram command and message handlers
+    agent_client.py     # HTTP + WebSocket client for Agent Zero
+    telegram_send.py    # HTML message sending with chunking
+    md_to_html.py       # Markdown to Telegram HTML converter
+    media.py            # Media extraction, download, and sending
+  docs/                 # Documentation
+  scripts/
+    release-dockerhub.sh  # Docker Hub release automation
+  Dockerfile
+  docker-compose.yml
+  example-docker-compose.yml
+  requirements.txt
+  .env.example
+```
+
 ## Getting a Telegram Bot Token
 
 1. Open Telegram and message [@BotFather](https://t.me/BotFather)
@@ -63,6 +85,8 @@ pip install -r requirements.txt
 export TELEGRAM_BOT_TOKEN="your-token-here"
 export AGENT_ZERO_API_KEY="your-api-key-here"
 export AGENT_ZERO_URL="http://localhost:50080"  # Agent Zero must be accessible
+export AGENT_ZERO_LOGIN="admin"
+export AGENT_ZERO_PASSWORD="your-agent-zero-password"
 export ALLOWED_TELEGRAM_USER_IDS="your-user-id"
 
 # 4. Run
@@ -111,3 +135,9 @@ Your Telegram user ID is not in the allowlist. Add it to `ALLOWED_TELEGRAM_USER_
 ```bash
 docker compose restart telegram-proxy
 ```
+
+### Streaming not working (responses appear all at once)
+
+1. Check that `AGENT_ZERO_LOGIN` and `AGENT_ZERO_PASSWORD` match the `AUTH_LOGIN` and `AUTH_PASSWORD` on your Agent Zero instance
+2. Look for `WebSocket connection failed, falling back to blocking API` in the proxy logs
+3. If running without Docker, ensure `AGENT_ZERO_URL` points to a reachable Agent Zero instance

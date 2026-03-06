@@ -48,7 +48,7 @@ User sends message
 
 - Uses Telegram Bot API 9.5 `sendMessageDraft` — purpose-built for streaming
 - Draft updates are throttled to avoid rate limits (default: 200ms between updates)
-- No markdown formatting during streaming (to avoid parse errors on partial text); formatting applies on the final message
+- During streaming, drafts are converted to Telegram HTML when the markup has balanced tags (via `safe_md_to_tg_html`); if tags are unbalanced mid-stream, the draft falls back to plain text. Full formatting always applies on the final message.
 
 ### Group Chats (sendMessage + editMessageText)
 
@@ -63,6 +63,7 @@ User sends message
 
 - Edits are throttled to ~1 per second (Telegram's rate limit for message edits)
 - `sendMessageDraft` is not available in group chats
+- If the final response contains media (images, documents, audio), the streaming preview message is deleted and replaced with native Telegram media messages
 
 ### Fallback (No WebSocket)
 
@@ -72,8 +73,11 @@ If the WebSocket connection to Agent Zero fails (typically due to missing or inc
 
 | Endpoint | Purpose | When Used |
 |---|---|---|
+| `POST /login` | Authenticate and get session cookies | Every streaming request |
+| `GET /csrf_token` | Fetch CSRF token for WebSocket and HTTP requests | Every streaming request |
+| `POST /chat_create` | Ensure conversation context exists | Every message (streaming path) |
 | `POST /message_queue_add` | Queue a message (with optional attachments) for the agent | Every message (streaming path) |
-| `POST /message_queue_send` | Trigger agent processing | Every message (streaming path) |
+| `POST /message_queue_send` | Trigger agent processing of queued messages | Every message (streaming path) |
 | `POST /api_message` | Send a message, get full response (blocking) | Fallback when WebSocket unavailable |
 | `POST /api_reset_chat` | Reset conversation state | `/reset` command |
 | WebSocket `/state_sync` | Real-time state push subscription | Streaming response updates |
@@ -81,5 +85,5 @@ If the WebSocket connection to Agent Zero fails (typically due to missing or inc
 ## Limitations
 
 - **Supported media types**: Photos, documents, and voice messages work in both directions. Video and sticker support is not yet implemented.
-- **No markdown in drafts**: During streaming, draft text is sent as plain text. Markdown formatting is only applied on the final sent message.
+- **Partial formatting in drafts**: During streaming, drafts are converted to Telegram HTML only when all tags are balanced. Incomplete markdown (e.g., an unclosed bold `**`) falls back to plain text for that draft update. Full formatting always applies on the final message.
 - **In-memory state**: The Telegram-to-context mapping is stored in memory. If the proxy container restarts, the mapping resets — but this is usually fine since the context IDs are deterministic (based on chat ID).

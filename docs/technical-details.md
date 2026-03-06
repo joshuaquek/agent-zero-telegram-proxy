@@ -8,6 +8,20 @@
 - **Entrypoint**: `python src/bot.py`
 - **Exposed ports**: None (outbound connections only)
 
+## Module Structure
+
+The proxy is organized into 7 focused Python modules:
+
+| Module | Responsibility |
+|---|---|
+| `bot.py` | Entrypoint — builds the `Application`, registers command and message handlers, starts long-polling |
+| `config.py` | Loads all environment variables, exports `is_allowed()` (user allowlist check) and `context_id_for()` (chat ID to context mapping) |
+| `handlers.py` | Telegram command handlers (`/start`, `/reset`) and message handlers (text, photo, document, voice). Routes private chats to `_stream_to_private_chat` and groups to `_stream_to_group_chat` |
+| `agent_client.py` | `AgentZeroClient` class — manages HTTP authentication, Socket.IO WebSocket streaming, and blocking API fallback. Implements baseline log tracking to filter historical logs |
+| `telegram_send.py` | `send_html_message()`, `edit_html_message()`, `send_html_chunks()`, `split_html_chunks()` — all with HTML-first + plain-text-fallback strategy |
+| `md_to_html.py` | Native Markdown-to-Telegram-HTML converter using only stdlib `re` and `html`. Handles code blocks, inline code, bold, italic, underline, strikethrough, spoiler, blockquotes, headings, lists, and links |
+| `media.py` | Extracts `![alt](url)` and `[text](url)` references from responses, classifies by file extension (image/voice/audio/document), downloads from Agent Zero, and sends as native Telegram media |
+
 ## Environment Variables
 
 | Variable | Required | Default | Description |
@@ -60,7 +74,7 @@ Streaming is the **default and primary** communication path. The bot uses Agent 
 1. **Connect** to the `/state_sync` namespace with session cookies + CSRF token
 2. **Subscribe** by emitting `state_request` with the conversation's `context_id`
 3. **Receive** `state_push` events containing a `SnapshotV1` with:
-   - `logs[]` — array of log items; items with `type == "response"` contain the agent's reply in their `content` field
+   - `logs[]` — array of log items; the proxy finds the **last** item with `type == "response"` and uses its `content` field as the current response text. A baseline log count filters out historical entries from previous turns.
    - `log_progress_active` — `true` while the agent is still generating, `false` when done
 4. **Forward** each text update to Telegram via `sendMessageDraft` (private) or `editMessageText` (group)
 5. **Finalize** with `sendMessage` when the agent is done
@@ -85,7 +99,7 @@ For group chats, edits are always throttled to ~1 per second regardless of this 
 
 ## Message Size Handling
 
-Telegram has a 4096-character limit per message. If Agent Zero returns a longer response, the bot automatically splits it into multiple sequential messages. During streaming, only the first 4096 characters are shown in the draft/preview.
+Telegram has a 4096-character limit per message. If Agent Zero returns a longer response, the bot automatically splits it into multiple sequential messages. The chunking logic avoids splitting inside HTML tags or entities, preferring to break at newlines or spaces. During streaming, only the first 4096 characters are shown in the draft/preview.
 
 ## Release Process
 

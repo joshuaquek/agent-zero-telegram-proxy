@@ -98,7 +98,20 @@ Emit a `state_request` event on the `/state_sync` namespace:
 
 The `context` field identifies the conversation. This proxy uses the format `telegram-<chat_id>` (e.g., `telegram-123456789`).
 
-### Step 5: Queue the User's Message
+### Step 5: Ensure Context and Queue the User's Message
+
+First, ensure the conversation context exists:
+
+```
+POST {AGENT_ZERO_URL}/chat_create
+X-API-KEY: <your-api-key>
+X-CSRF-Token: <csrf-token>
+Content-Type: application/json
+
+{"new_context": "telegram-<chat_id>"}
+```
+
+Then queue the message:
 
 ```
 POST {AGENT_ZERO_URL}/message_queue_add
@@ -120,9 +133,8 @@ For messages with media attachments (photos, documents, voice):
   "text": "What's in this image?",
   "attachments": [
     {
-      "type": "image",
-      "content": "<base64-encoded data>",
-      "filename": "photo.jpg"
+      "path": "data:image/jpeg;base64,<base64-encoded data>",
+      "name": "photo.jpg"
     }
   ]
 }
@@ -172,9 +184,11 @@ After triggering processing, the WebSocket emits `state_push` events as the agen
 | `snapshot.logs[].content` | string | The text content of that log item |
 | `snapshot.log_progress_active` | boolean | `true` while the agent is still generating, `false` when done |
 
-**To extract the agent's response text:** filter `logs` for items where `type == "response"` and concatenate their `content` fields (joined with `\n\n`).
+**To extract the agent's response text:** find the last log item where `type == "response"` and use its `content` field. The proxy iterates `logs` in reverse and takes the first match — this is the most up-to-date response text.
 
 **To detect completion:** check when `log_progress_active` becomes `false`.
+
+**Baseline tracking:** The first `state_push` after subscribing contains historical logs from previous turns. Record `len(logs)` as the baseline on the first push and only process `logs[baseline:]` on subsequent pushes. If `len(logs)` drops below the baseline (the server switched to a per-turn view), reset the baseline to 0.
 
 ### Step 8: Forward to Telegram
 
@@ -252,8 +266,9 @@ This returns the full response in one shot — no streaming. The user sees the c
 |---|---|---|---|---|
 | `/login` | POST | username/password | Get session cookies for WebSocket | Streaming |
 | `/csrf_token` | GET | Session cookie | Get CSRF token for WebSocket | Streaming |
-| `/message_queue_add` | POST | X-API-KEY | Queue a message with optional attachments | Streaming |
-| `/message_queue_send` | POST | X-API-KEY | Trigger agent processing of queued messages | Streaming |
+| `/chat_create` | POST | X-API-KEY + CSRF | Ensure conversation context exists | Streaming |
+| `/message_queue_add` | POST | X-API-KEY + CSRF | Queue a message with optional attachments | Streaming |
+| `/message_queue_send` | POST | X-API-KEY + CSRF | Trigger agent processing of queued messages | Streaming |
 | `/state_sync` (WebSocket) | Socket.IO | Session cookie + CSRF | Real-time state push subscription | Streaming |
 | `/api_message` | POST | X-API-KEY | Send message and get full response (blocking) | Fallback only |
 | `/api_reset_chat` | POST | X-API-KEY | Reset conversation state | `/reset` command |
