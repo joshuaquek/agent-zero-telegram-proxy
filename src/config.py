@@ -29,5 +29,7 @@ def is_allowed(user_id: int) -> bool:
     return user_id in ALLOWED_USER_IDS
 
 
-def context_id_for(chat_id: int) -> str:
+def context_id_for(chat_id: int, thread_id: int | None = None) -> str:
+    if thread_id is not None:
+        return f"telegram-{chat_id}-topic-{thread_id}"
     return f"telegram-{chat_id}"

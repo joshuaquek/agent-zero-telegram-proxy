@@ -116,42 +116,45 @@ async def _download_file(url: str) -> bytes:
 
 
 async def send_response_with_media(
-    bot, chat_id: int, text: str, *, draft_id: int | None = None,
+    bot, chat_id: int, text: str, *,
+    draft_id: int | None = None, message_thread_id: int | None = None,
 ) -> None:
     """Send a response that may contain markdown media as native Telegram media.
 
     If *draft_id* is provided, the first text message sent will include it so
     that Telegram replaces the streaming draft preview with the final message.
+    *message_thread_id* targets a specific forum topic.
     """
     cleaned_text, media_items = extract_media_from_response(text)
     if len(cleaned_text) != len(text.strip()):
         logger.warning("[send_response_with_media] text shrunk: input=%d, cleaned=%d, media=%d items, tail=%r",
                        len(text), len(cleaned_text), len(media_items), text[len(cleaned_text):len(cleaned_text)+100])
 
+    thread_kw = {"message_thread_id": message_thread_id} if message_thread_id is not None else {}
     for item in media_items:
         resolved_url = _resolve_url(item.url)
         caption = item.alt if item.alt else None
         try:
             file_bytes = await _download_file(item.url)
             if item.kind == "image":
-                await bot.send_photo(chat_id=chat_id, photo=file_bytes, caption=caption)
+                await bot.send_photo(chat_id=chat_id, photo=file_bytes, caption=caption, **thread_kw)
             elif item.kind == "voice":
-                await bot.send_voice(chat_id=chat_id, voice=file_bytes, caption=caption)
+                await bot.send_voice(chat_id=chat_id, voice=file_bytes, caption=caption, **thread_kw)
             elif item.kind == "audio":
                 await bot.send_audio(chat_id=chat_id, audio=file_bytes, caption=caption,
-                                     title=item.alt or None)
+                                     title=item.alt or None, **thread_kw)
             elif item.kind == "document":
                 filename = item.alt or item.url.split('/')[-1].split('?')[0]
                 await bot.send_document(chat_id=chat_id, document=file_bytes,
-                                        filename=filename, caption=caption)
+                                        filename=filename, caption=caption, **thread_kw)
         except Exception:
             logger.exception("Failed to send %s %s, sending as text link", item.kind, resolved_url)
             link_html = f'<a href="{html_mod.escape(resolved_url)}">{html_mod.escape(item.alt or item.kind)}</a>'
-            await send_html_message(bot, chat_id, link_html)
+            await send_html_message(bot, chat_id, link_html, message_thread_id=message_thread_id)
 
     # Send remaining text with Telegram HTML formatting
     if cleaned_text:
         formatted = md_to_tg_html(cleaned_text)
         logger.info("[send_response] raw=%d chars, html=%d chars, sample: %s",
                      len(cleaned_text), len(formatted), formatted[:300])
-        await send_html_chunks(bot, chat_id, formatted, draft_id=draft_id)
+        await send_html_chunks(bot, chat_id, formatted, draft_id=draft_id, message_thread_id=message_thread_id)

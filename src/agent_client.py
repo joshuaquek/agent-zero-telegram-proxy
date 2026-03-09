@@ -135,6 +135,13 @@ class AgentZeroClient:
                         len(logs), len(new_logs), log_active,
                         [l.get("type") for l in new_logs])
 
+            # Log ALL new log items for debugging media/screenshot issues
+            for log_item in new_logs:
+                log_type = log_item.get("type", "?")
+                content = log_item.get("content", "")
+                logger.info("[state_push] log type=%s, content_len=%d, content_preview=%r",
+                            log_type, len(content), content[:300] if content else "")
+
             # Extract the LAST response content from new logs only
             latest_response = ""
             for log_item in reversed(new_logs):

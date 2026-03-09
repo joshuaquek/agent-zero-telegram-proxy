@@ -48,7 +48,8 @@ async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text("Sorry, you are not authorized to use this bot.")
         return
 
-    ctx_id = context_id_for(update.effective_chat.id)
+    thread_id = update.message.message_thread_id
+    ctx_id = context_id_for(update.effective_chat.id, thread_id)
     try:
         await agent_client.reset_chat(ctx_id)
         await update.message.reply_text("Conversation has been reset. Send a new message to start fresh.")
@@ -58,7 +59,8 @@ async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def _stream_to_private_chat(
-    bot, chat_id: int, ctx_id: str, text: str, attachments: list | None = None,
+    bot, chat_id: int, ctx_id: str, text: str,
+    attachments: list | None = None, message_thread_id: int | None = None,
 ) -> None:
     """Stream response to a private chat using sendMessageDraft."""
     draft_id = int(time.time() * 1000) % (2**31 - 1)
@@ -86,6 +88,8 @@ async def _stream_to_private_chat(
                     kwargs = {"chat_id": chat_id, "draft_id": draft_id, "text": draft_text}
                     if draft_is_html:
                         kwargs["parse_mode"] = ParseMode.HTML
+                    if message_thread_id is not None:
+                        kwargs["message_thread_id"] = message_thread_id
                     await bot.send_message_draft(**kwargs)
                     last_draft_time = time.monotonic()
                 except Exception:
@@ -99,17 +103,19 @@ async def _stream_to_private_chat(
         final_text = "(Agent Zero returned an empty response.)"
 
     logger.info("[final_text] len=%d, tail=%r", len(final_text), final_text[-80:] if len(final_text) > 80 else final_text)
-    await send_response_with_media(bot, chat_id, final_text, draft_id=draft_id)
+    await send_response_with_media(bot, chat_id, final_text, draft_id=draft_id, message_thread_id=message_thread_id)
 
 
 async def _stream_to_group_chat(
-    bot, chat_id: int, ctx_id: str, text: str, attachments: list | None = None,
+    bot, chat_id: int, ctx_id: str, text: str,
+    attachments: list | None = None, message_thread_id: int | None = None,
 ) -> None:
     """Stream response to a group chat using sendMessage + editMessageText."""
     sent_message = None
     last_edit_time = 0.0
     edit_throttle_sec = 1.0
     final_text = ""
+    thread_kw = {"message_thread_id": message_thread_id} if message_thread_id is not None else {}
 
     try:
         async for response_text, is_done in agent_client.send_message_streaming(ctx_id, text, attachments):
@@ -131,7 +137,7 @@ async def _stream_to_group_chat(
             parse_kw = {"parse_mode": ParseMode.HTML} if preview_is_html else {}
             try:
                 if sent_message is None:
-                    sent_message = await bot.send_message(chat_id=chat_id, text=preview_text, **parse_kw)
+                    sent_message = await bot.send_message(chat_id=chat_id, text=preview_text, **parse_kw, **thread_kw)
                 else:
                     await bot.edit_message_text(
                         chat_id=chat_id, message_id=sent_message.message_id,
@@ -157,7 +163,7 @@ async def _stream_to_group_chat(
             logger.debug("Failed to delete preview message")
 
     if media_items:
-        await send_response_with_media(bot, chat_id, final_text)
+        await send_response_with_media(bot, chat_id, final_text, message_thread_id=message_thread_id)
     else:
         # No images — do the normal final edit or send
         final_html = md_to_tg_html(final_text)
@@ -167,11 +173,11 @@ async def _stream_to_group_chat(
             if sent_message is not None:
                 ok = await edit_html_message(bot, chat_id, sent_message.message_id, first_chunk)
                 if not ok:
-                    await send_html_message(bot, chat_id, first_chunk)
+                    await send_html_message(bot, chat_id, first_chunk, message_thread_id=message_thread_id)
             else:
-                await send_html_message(bot, chat_id, first_chunk)
+                await send_html_message(bot, chat_id, first_chunk, message_thread_id=message_thread_id)
             for chunk in chunks[1:]:
-                await send_html_message(bot, chat_id, chunk)
+                await send_html_message(bot, chat_id, chunk, message_thread_id=message_thread_id)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -181,19 +187,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     user_text = update.message.text
     chat_id = update.effective_chat.id
-    ctx_id = context_id_for(chat_id)
+    thread_id = update.message.message_thread_id
+    ctx_id = context_id_for(chat_id, thread_id)
     is_private = update.effective_chat.type == ChatType.PRIVATE
+
+    logger.info("[handle_message] chat_id=%s, thread_id=%s, ctx_id=%s, chat_type=%s, is_topic=%s",
+                chat_id, thread_id, ctx_id, update.effective_chat.type,
+                getattr(update.message, "is_topic_message", None))
 
     # Send immediate acknowledgment so the user knows we received it
     ack_msg = await update.message.reply_text("Got it, working on it...")
 
-    await update.effective_chat.send_action("typing")
+    action_kw = {"message_thread_id": thread_id} if thread_id is not None else {}
+    await update.effective_chat.send_action("typing", **action_kw)
 
     try:
         if is_private:
-            await _stream_to_private_chat(context.bot, chat_id, ctx_id, user_text)
+            await _stream_to_private_chat(context.bot, chat_id, ctx_id, user_text, message_thread_id=thread_id)
         else:
-            await _stream_to_group_chat(context.bot, chat_id, ctx_id, user_text)
+            await _stream_to_group_chat(context.bot, chat_id, ctx_id, user_text, message_thread_id=thread_id)
     except httpx.TimeoutException:
         await update.message.reply_text("Agent Zero took too long to respond. Please try again.")
     except httpx.ConnectError:
@@ -215,20 +227,24 @@ async def _handle_media(
 ) -> None:
     """Shared logic for forwarding a media attachment to Agent Zero."""
     chat_id = update.effective_chat.id
-    ctx_id = context_id_for(chat_id)
+    thread_id = update.message.message_thread_id
+    ctx_id = context_id_for(chat_id, thread_id)
     is_private = update.effective_chat.type == ChatType.PRIVATE
     user_text = update.message.caption or caption_fallback
+
+    logger.info("[_handle_media] chat_id=%s, thread_id=%s, ctx_id=%s", chat_id, thread_id, ctx_id)
 
     # Send immediate acknowledgment so the user knows we received it
     ack_msg = await update.message.reply_text("Got it, working on it...")
 
-    await update.effective_chat.send_action("typing")
+    action_kw = {"message_thread_id": thread_id} if thread_id is not None else {}
+    await update.effective_chat.send_action("typing", **action_kw)
 
     try:
         if is_private:
-            await _stream_to_private_chat(context.bot, chat_id, ctx_id, user_text, [attachment])
+            await _stream_to_private_chat(context.bot, chat_id, ctx_id, user_text, [attachment], message_thread_id=thread_id)
         else:
-            await _stream_to_group_chat(context.bot, chat_id, ctx_id, user_text, [attachment])
+            await _stream_to_group_chat(context.bot, chat_id, ctx_id, user_text, [attachment], message_thread_id=thread_id)
     except httpx.TimeoutException:
         await update.message.reply_text("Agent Zero took too long to respond. Please try again.")
     except httpx.ConnectError:

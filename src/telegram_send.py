@@ -51,17 +51,22 @@ def split_html_chunks(html_text: str, max_len: int = 4096) -> list[str]:
     return chunks
 
 
-async def send_html_message(bot, chat_id: int, text: str, *, draft_id: int | None = None):
+async def send_html_message(
+    bot, chat_id: int, text: str, *,
+    draft_id: int | None = None, message_thread_id: int | None = None,
+):
     """Send a single message with parse_mode=HTML, falling back to plain text on error.
 
     *draft_id* is passed via ``api_kwargs`` so Telegram replaces the streaming
     draft preview with the final message (Bot API 9.5+).
+    *message_thread_id* targets a specific forum topic.
     """
     api_kw = {"draft_id": draft_id} if draft_id else None
+    thread_kw = {"message_thread_id": message_thread_id} if message_thread_id is not None else {}
     try:
         msg = await bot.send_message(
             chat_id=chat_id, text=text, parse_mode=ParseMode.HTML,
-            api_kwargs=api_kw,
+            api_kwargs=api_kw, **thread_kw,
         )
         logger.info("[send_html] OK, sent %d chars with HTML parse_mode", len(text))
         return msg
@@ -69,7 +74,7 @@ async def send_html_message(bot, chat_id: int, text: str, *, draft_id: int | Non
         logger.warning("[send_html] HTML send failed (%s), falling back to plain text. Text sample: %s",
                        exc, text[:200])
         try:
-            return await bot.send_message(chat_id=chat_id, text=text)
+            return await bot.send_message(chat_id=chat_id, text=text, **thread_kw)
         except Exception:
             logger.exception("Plain text send also failed")
             return None
@@ -96,7 +101,8 @@ async def edit_html_message(bot, chat_id: int, message_id: int, text: str, **kwa
 
 
 async def send_html_chunks(
-    bot, chat_id: int, html_text: str, *, draft_id: int | None = None,
+    bot, chat_id: int, html_text: str, *,
+    draft_id: int | None = None, message_thread_id: int | None = None,
 ) -> None:
     """Split HTML into safe chunks and send each one.
 
@@ -105,4 +111,8 @@ async def send_html_chunks(
     """
     chunks = split_html_chunks(html_text)
     for i, chunk in enumerate(chunks):
-        await send_html_message(bot, chat_id, chunk, draft_id=draft_id if i == 0 else None)
+        await send_html_message(
+            bot, chat_id, chunk,
+            draft_id=draft_id if i == 0 else None,
+            message_thread_id=message_thread_id,
+        )
