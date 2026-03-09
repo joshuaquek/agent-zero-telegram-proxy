@@ -184,6 +184,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     ctx_id = context_id_for(chat_id)
     is_private = update.effective_chat.type == ChatType.PRIVATE
 
+    # Send immediate acknowledgment so the user knows we received it
+    ack_msg = await update.message.reply_text("Got it, working on it...")
+
     await update.effective_chat.send_action("typing")
 
     try:
@@ -199,6 +202,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         logger.exception("Error handling message")
         await update.message.reply_text("Something went wrong while contacting Agent Zero.")
 
+    # Clean up the acknowledgment message now that the real response has been sent
+    try:
+        await ack_msg.delete()
+    except Exception:
+        pass
+
 
 async def _handle_media(
     update: Update, context: ContextTypes.DEFAULT_TYPE,
@@ -209,6 +218,9 @@ async def _handle_media(
     ctx_id = context_id_for(chat_id)
     is_private = update.effective_chat.type == ChatType.PRIVATE
     user_text = update.message.caption or caption_fallback
+
+    # Send immediate acknowledgment so the user knows we received it
+    ack_msg = await update.message.reply_text("Got it, working on it...")
 
     await update.effective_chat.send_action("typing")
 
@@ -224,6 +236,12 @@ async def _handle_media(
     except Exception:
         logger.exception("Error handling media message")
         await update.message.reply_text("Something went wrong while contacting Agent Zero.")
+
+    # Clean up the acknowledgment message now that the real response has been sent
+    try:
+        await ack_msg.delete()
+    except Exception:
+        pass
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
