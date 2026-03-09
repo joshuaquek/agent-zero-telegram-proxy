@@ -10,11 +10,6 @@ from config import AGENT_ZERO_LOGIN, AGENT_ZERO_PASSWORD, AGENT_ZERO_URL, logger
 from md_to_html import md_to_tg_html
 from telegram_send import send_html_chunks, send_html_message
 
-# Regex to find markdown images: ![alt](url)
-_IMAGE_RE = re.compile(r'!\[([^\]]*)\]\(([^)]+)\)')
-# Regex to find markdown links: [text](url)
-_LINK_RE = re.compile(r'\[([^\]]*)\]\(([^)]+)\)')
-
 _IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'}
 _VOICE_EXTENSIONS = {'.ogg', '.oga'}
 _AUDIO_EXTENSIONS = {'.mp3', '.wav', '.flac', '.aac', '.m4a'} | _VOICE_EXTENSIONS
@@ -23,6 +18,14 @@ _DOCUMENT_EXTENSIONS = {
     '.txt', '.csv', '.zip', '.tar', '.gz', '.7z', '.rar',
     '.json', '.xml', '.yaml', '.yml', '.py', '.js', '.ts', '.html', '.css',
 }
+_ALL_KNOWN_EXTENSIONS = _IMAGE_EXTENSIONS | _AUDIO_EXTENSIONS | _DOCUMENT_EXTENSIONS
+
+# Regex to find markdown images: ![alt](url)
+_IMAGE_RE = re.compile(r'!\[([^\]]*)\]\(([^)]+)\)')
+# Regex to find markdown links: [text](url)
+_LINK_RE = re.compile(r'\[([^\]]*)\]\(([^)]+)\)')
+# Regex to find plain-text Agent Zero file paths: /a0/usr/<subpath>/<file>.<ext>
+_A0_PATH_RE = re.compile(r'/a0/usr/(\S+\.\w+)')
 
 
 def _url_extension(url: str) -> str:
@@ -80,6 +83,25 @@ def extract_media_from_response(text: str) -> tuple[str, list[MediaItem]]:
         elif ext in _DOCUMENT_EXTENSIONS:
             media.append(MediaItem("document", alt, url))
             patterns_to_strip.append(m)
+
+    # 3) Plain-text Agent Zero container paths: /a0/usr/chats/.../<file>.<ext>
+    #    Convert to HTTP-accessible relative URLs by stripping /a0/usr prefix.
+    for m in _A0_PATH_RE.finditer(text):
+        if any(im.start() <= m.start() < im.end() for im in patterns_to_strip):
+            continue
+        relative_url = "/" + m.group(1)  # e.g. /chats/.../screenshot.png
+        ext = _url_extension(relative_url)
+        if ext not in _ALL_KNOWN_EXTENSIONS:
+            continue
+        if ext in _IMAGE_EXTENSIONS:
+            media.append(MediaItem("image", "", relative_url))
+        elif ext in _VOICE_EXTENSIONS:
+            media.append(MediaItem("voice", "", relative_url))
+        elif ext in _AUDIO_EXTENSIONS:
+            media.append(MediaItem("audio", "", relative_url))
+        elif ext in _DOCUMENT_EXTENSIONS:
+            media.append(MediaItem("document", "", relative_url))
+        patterns_to_strip.append(m)
 
     # Strip matched patterns from the text
     cleaned = text

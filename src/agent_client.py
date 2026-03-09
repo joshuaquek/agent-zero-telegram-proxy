@@ -1,6 +1,7 @@
 """Agent Zero HTTP + WebSocket streaming client."""
 
 import asyncio
+import re
 import time
 from dataclasses import dataclass, field
 
@@ -8,6 +9,9 @@ import httpx
 import socketio
 
 from config import REQUEST_TIMEOUT, logger
+
+# Match /a0/usr/<path>.<image_ext> in any log content (agent thoughts, code_exe, etc.)
+_A0_IMAGE_PATH_RE = re.compile(r'/a0/usr/(\S+\.(?:png|jpg|jpeg|gif|bmp|webp))', re.IGNORECASE)
 
 
 @dataclass
@@ -150,6 +154,22 @@ class AgentZeroClient:
                     if content:
                         response_parts.append(content)
             latest_response = "\n\n".join(response_parts) if response_parts else ""
+
+            # Scan ALL log types for /a0/usr/ image paths (screenshots etc.)
+            # that aren't already referenced in the response text.
+            found_images: list[str] = []
+            for log_item in new_logs:
+                content = log_item.get("content", "")
+                if not content:
+                    continue
+                for m in _A0_IMAGE_PATH_RE.finditer(content):
+                    path = "/a0/usr/" + m.group(1)
+                    if path not in latest_response and path not in found_images:
+                        found_images.append(path)
+            if found_images:
+                logger.info("[state_push] Found image paths in logs: %s", found_images)
+                # Append as plain-text paths so media.py can extract them
+                latest_response = latest_response + "\n\n" + "\n".join(found_images) if latest_response else "\n".join(found_images)
 
             if latest_response:
                 logger.info("[state_push] response (%d chars): %s",

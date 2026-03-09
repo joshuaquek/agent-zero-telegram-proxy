@@ -6,6 +6,14 @@ from telegram.constants import ParseMode
 
 from config import logger
 
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _strip_html(text: str) -> str:
+    """Strip HTML tags and unescape entities for plain-text fallback."""
+    plain = _HTML_TAG_RE.sub("", text)
+    return plain.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", '"')
+
 
 def split_html_chunks(html_text: str, max_len: int = 4096) -> list[str]:
     """Split HTML text into chunks that respect Telegram's size limit.
@@ -74,7 +82,7 @@ async def send_html_message(
         logger.warning("[send_html] HTML send failed (%s), falling back to plain text. Text sample: %s",
                        exc, text[:200])
         try:
-            return await bot.send_message(chat_id=chat_id, text=text, **thread_kw)
+            return await bot.send_message(chat_id=chat_id, text=_strip_html(text), **thread_kw)
         except Exception:
             logger.exception("Plain text send also failed")
             return None
@@ -92,7 +100,7 @@ async def edit_html_message(bot, chat_id: int, message_id: int, text: str, **kwa
         logger.warning("HTML edit failed, falling back to plain text")
         try:
             await bot.edit_message_text(
-                chat_id=chat_id, message_id=message_id, text=text, **kwargs,
+                chat_id=chat_id, message_id=message_id, text=_strip_html(text), **kwargs,
             )
             return True
         except Exception:
