@@ -27,6 +27,14 @@ _LINK_RE = re.compile(r'\[([^\]]*)\]\(([^)]+)\)')
 # Regex to find plain-text Agent Zero file paths: /a0/usr/<subpath>/<file>.<ext>
 _A0_PATH_RE = re.compile(r'/a0/usr/(\S+\.\w+)')
 
+# Trivial leftover text after media extraction that should be suppressed
+# (e.g. Agent Zero responds with just "image" and a screenshot path in logs)
+_TRIVIAL_MEDIA_LABELS = {
+    'image', 'images', 'photo', 'photos', 'picture', 'pictures',
+    'screenshot', 'screenshots', 'file', 'files', 'document', 'documents',
+    'audio', 'voice', 'video',
+}
+
 
 def _url_extension(url: str) -> str:
     """Return the lowercase file extension from a URL, ignoring query params."""
@@ -85,22 +93,29 @@ def extract_media_from_response(text: str) -> tuple[str, list[MediaItem]]:
             patterns_to_strip.append(m)
 
     # 3) Plain-text Agent Zero container paths: /a0/usr/chats/.../<file>.<ext>
-    #    Convert to HTTP-accessible relative URLs by stripping /a0/usr prefix.
+    #    Keep the full /a0/usr/ prefix so _resolve_url routes through /image_get.
+    #    Skip if the same filename was already extracted from a markdown reference.
+    existing_filenames = {item.url.split("/")[-1].split("?")[0].split("&")[0] for item in media}
     for m in _A0_PATH_RE.finditer(text):
         if any(im.start() <= m.start() < im.end() for im in patterns_to_strip):
             continue
-        relative_url = "/" + m.group(1)  # e.g. /chats/.../screenshot.png
-        ext = _url_extension(relative_url)
+        full_path = "/a0/usr/" + m.group(1)  # e.g. /a0/usr/screenshots/screenshot.png
+        filename = full_path.split("/")[-1]
+        if filename in existing_filenames:
+            patterns_to_strip.append(m)  # still strip from text
+            continue
+        ext = _url_extension(full_path)
         if ext not in _ALL_KNOWN_EXTENSIONS:
             continue
         if ext in _IMAGE_EXTENSIONS:
-            media.append(MediaItem("image", "", relative_url))
+            media.append(MediaItem("image", "", full_path))
         elif ext in _VOICE_EXTENSIONS:
-            media.append(MediaItem("voice", "", relative_url))
+            media.append(MediaItem("voice", "", full_path))
         elif ext in _AUDIO_EXTENSIONS:
-            media.append(MediaItem("audio", "", relative_url))
+            media.append(MediaItem("audio", "", full_path))
         elif ext in _DOCUMENT_EXTENSIONS:
-            media.append(MediaItem("document", "", relative_url))
+            media.append(MediaItem("document", "", full_path))
+        existing_filenames.add(filename)
         patterns_to_strip.append(m)
 
     # Strip matched patterns from the text
@@ -113,7 +128,22 @@ def extract_media_from_response(text: str) -> tuple[str, list[MediaItem]]:
 
 
 def _resolve_url(url: str) -> str:
-    """Prepend AGENT_ZERO_URL to relative URLs."""
+    """Resolve a media URL to a fully-qualified HTTP URL on Agent Zero.
+
+    Agent Zero uses ``img:///a0/usr/...`` for screenshots.  Its web UI
+    translates that to ``/image_get?path=<path>``.  We do the same here.
+    Plain ``/a0/usr/...`` paths are also routed through ``/image_get``.
+    """
+    # img:///a0/usr/path&t=... → strip scheme and optional cache-buster
+    if url.startswith("img://"):
+        path = url[len("img://"):]
+        # Strip trailing cache-buster (&t=...)
+        if "&" in path:
+            path = path.split("&")[0]
+        return f"{AGENT_ZERO_URL}/image_get?path={path}"
+    # /a0/usr/screenshots/... → use image_get endpoint
+    if url.startswith("/a0/usr/") or url.startswith("/a0/"):
+        return f"{AGENT_ZERO_URL}/image_get?path={url}"
     if url.startswith("/"):
         return f"{AGENT_ZERO_URL}{url}"
     return url
@@ -123,6 +153,7 @@ async def _download_file(url: str) -> bytes:
     """Download a file from a URL and return its bytes."""
     async with httpx.AsyncClient(timeout=30) as client:
         resolved = _resolve_url(url)
+        headers: dict[str, str] = {}
         if resolved.startswith(AGENT_ZERO_URL) and AGENT_ZERO_LOGIN and AGENT_ZERO_PASSWORD:
             try:
                 await client.post(
@@ -132,7 +163,20 @@ async def _download_file(url: str) -> bytes:
                 )
             except Exception:
                 logger.debug("Login for file download failed, trying without auth")
-        resp = await client.get(resolved)
+            # Fetch CSRF token — required by endpoints like /image_get
+            try:
+                csrf_resp = await client.get(f"{AGENT_ZERO_URL}/csrf_token")
+                if csrf_resp.status_code == 200:
+                    csrf_data = csrf_resp.json()
+                    token = csrf_data.get("token") or csrf_data.get("csrf_token")
+                    runtime_id = csrf_data.get("runtime_id")
+                    if token:
+                        headers["X-CSRF-Token"] = token
+                    if token and runtime_id:
+                        client.cookies.set(f"csrf_token_{runtime_id}", token)
+            except Exception:
+                logger.debug("CSRF token fetch failed, trying without it")
+        resp = await client.get(resolved, headers=headers)
         resp.raise_for_status()
         return resp.content
 
@@ -175,6 +219,12 @@ async def send_response_with_media(
             await send_html_message(bot, chat_id, link_html, message_thread_id=message_thread_id)
 
     # Send remaining text with Telegram HTML formatting
+    # Skip trivial leftover labels like "image" when we already sent media
+    if cleaned_text and media_items and cleaned_text.strip().lower() in _TRIVIAL_MEDIA_LABELS:
+        logger.info("[send_response] Suppressing trivial leftover text %r (sent %d media items)",
+                     cleaned_text, len(media_items))
+        cleaned_text = ""
+
     if cleaned_text:
         formatted = md_to_tg_html(cleaned_text)
         logger.info("[send_response] raw=%d chars, html=%d chars, sample: %s",
