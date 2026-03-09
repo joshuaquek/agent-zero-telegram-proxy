@@ -86,4 +86,4 @@ If the WebSocket connection to Agent Zero fails (typically due to missing or inc
 
 - **Supported media types**: Photos, documents, and voice messages work in both directions. Video and sticker support is not yet implemented.
 - **Partial formatting in drafts**: During streaming, drafts are converted to Telegram HTML only when all tags are balanced. Incomplete markdown (e.g., an unclosed bold `**`) falls back to plain text for that draft update. Full formatting always applies on the final message.
-- **In-memory state**: The Telegram-to-context mapping is stored in memory. If the proxy container restarts, the mapping resets — but this is usually fine since the context IDs are deterministic (based on chat ID).
+- **Stateless proxy**: The context mapping is deterministic (`telegram-<chat_id>` or `telegram-<chat_id>-topic-<thread_id>`), so restarting the proxy container loses no state — conversations resume seamlessly.

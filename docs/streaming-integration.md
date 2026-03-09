@@ -96,7 +96,7 @@ Emit a `state_request` event on the `/state_sync` namespace:
 }
 ```
 
-The `context` field identifies the conversation. This proxy uses the format `telegram-<chat_id>` (e.g., `telegram-123456789`).
+The `context` field identifies the conversation. This proxy uses the format `telegram-<chat_id>` (e.g., `telegram-123456789`). For forum topics, the format is `telegram-<chat_id>-topic-<thread_id>` (e.g., `telegram-987654321-topic-555`).
 
 ### Step 5: Ensure Context and Queue the User's Message
 
@@ -184,11 +184,13 @@ After triggering processing, the WebSocket emits `state_push` events as the agen
 | `snapshot.logs[].content` | string | The text content of that log item |
 | `snapshot.log_progress_active` | boolean | `true` while the agent is still generating, `false` when done |
 
-**To extract the agent's response text:** find the last log item where `type == "response"` and use its `content` field. The proxy iterates `logs` in reverse and takes the first match — this is the most up-to-date response text.
+**To extract the agent's response text:** find all log items where `type == "response"` and concatenate their `content` fields (joined by double newlines). The proxy collects all response logs from the new entries (after the baseline) and combines them — this handles multi-part responses from the agent.
 
 **To detect completion:** check when `log_progress_active` becomes `false`.
 
 **Baseline tracking:** The first `state_push` after subscribing contains historical logs from previous turns. Record `len(logs)` as the baseline on the first push and only process `logs[baseline:]` on subsequent pushes. If `len(logs)` drops below the baseline (the server switched to a per-turn view), reset the baseline to 0.
+
+**Image path scanning:** The proxy also scans all new log entries (not just `type == "response"`) for Agent Zero container file paths matching `/a0/usr/<path>.<image_ext>`. Any image paths found in tool outputs, code execution results, etc. that aren't already referenced in the response text are appended to the response. This ensures screenshots and generated images from agent tools are forwarded to Telegram even when the agent doesn't explicitly include them in its text reply.
 
 ### Step 8: Forward to Telegram
 

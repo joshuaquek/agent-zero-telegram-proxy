@@ -104,6 +104,7 @@ The bot handles media in both directions:
 
 - **Incoming**: Send photos, documents, or voice messages to the bot — they are base64-encoded and forwarded to Agent Zero as attachments.
 - **Outgoing**: When Agent Zero's response contains markdown media references (`![alt](url)` or `[text](url)`), the bot downloads and sends them as native Telegram photos, documents, voice messages, or audio files. If a download fails, a clickable link is sent instead.
+- **Auto-detected images**: The proxy also scans agent logs (tool outputs, code execution results) for `/a0/usr/` file paths pointing to images (screenshots, generated files). These are automatically forwarded to Telegram even if the agent doesn't reference them in its text reply.
 
 ## Environment Variables
 

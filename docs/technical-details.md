@@ -74,7 +74,7 @@ Streaming is the **default and primary** communication path. The bot uses Agent 
 1. **Connect** to the `/state_sync` namespace with session cookies + CSRF token
 2. **Subscribe** by emitting `state_request` with the conversation's `context_id`
 3. **Receive** `state_push` events containing a `SnapshotV1` with:
-   - `logs[]` — array of log items; the proxy finds the **last** item with `type == "response"` and uses its `content` field as the current response text. A baseline log count filters out historical entries from previous turns.
+   - `logs[]` — array of log items; the proxy concatenates **all** items with `type == "response"` (from new logs only, after the baseline) to build the current response text. A baseline log count filters out historical entries from previous turns. The proxy also scans all log types for `/a0/usr/` image paths (screenshots, generated images) and appends them to the response.
    - `log_progress_active` — `true` while the agent is still generating, `false` when done
 4. **Forward** each text update to Telegram via `sendMessageDraft` (private) or `editMessageText` (group)
 5. **Finalize** with `sendMessage` when the agent is done

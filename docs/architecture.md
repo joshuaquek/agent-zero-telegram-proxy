@@ -65,15 +65,17 @@ The Telegram proxy is a lightweight Python service that bridges Telegram's Bot A
 
 ## Conversation Mapping
 
-Each Telegram chat ID maps to a unique Agent Zero `context_id`:
+Each Telegram chat ID maps to a unique Agent Zero `context_id`. Forum topics get their own context so conversations stay isolated per topic:
 
-| Telegram Chat ID | Agent Zero context_id |
+| Telegram Chat | Agent Zero context_id |
 |---|---|
-| `123456789` | `telegram-123456789` |
-| `987654321` | `telegram-987654321` |
+| Private chat `123456789` | `telegram-123456789` |
+| Group chat `987654321` | `telegram-987654321` |
+| Forum topic `555` in group `987654321` | `telegram-987654321-topic-555` |
 
 This means:
 - Each user (or group chat) gets an independent conversation with the agent
+- Each forum topic in a supergroup gets its own independent conversation
 - Conversations persist across messages until explicitly reset with `/reset`
 - The `/reset` command calls Agent Zero's `POST /api_reset_chat` to clear the conversation state
 
