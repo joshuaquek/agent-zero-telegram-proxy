@@ -142,14 +142,14 @@ class AgentZeroClient:
                 logger.info("[state_push] log type=%s, content_len=%d, content_preview=%r",
                             log_type, len(content), content[:300] if content else "")
 
-            # Extract the LAST response content from new logs only
-            latest_response = ""
-            for log_item in reversed(new_logs):
+            # Concatenate ALL response content from new logs
+            response_parts = []
+            for log_item in new_logs:
                 if log_item.get("type") == "response":
                     content = log_item.get("content", "")
                     if content:
-                        latest_response = content
-                        break
+                        response_parts.append(content)
+            latest_response = "\n\n".join(response_parts) if response_parts else ""
 
             if latest_response:
                 logger.info("[state_push] response (%d chars): %s",
