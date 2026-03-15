@@ -18,6 +18,7 @@ _A0_IMAGE_PATH_RE = re.compile(r'/a0/usr/(\S+\.(?:png|jpg|jpeg|gif|bmp|webp))', 
 class StreamState:
     """Tracks the latest response text and completion status from state_push events."""
     response_text: str = ""
+    status_line: str = ""
     is_done: bool = False
     event: asyncio.Event = field(default_factory=asyncio.Event)
 
@@ -31,6 +32,7 @@ class AgentZeroClient:
         self.api_key = api_key
         self.login = login
         self.password = password
+        self._known_contexts: set[str] = set()
 
     async def _get_http_client(self) -> httpx.AsyncClient:
         """Create an HTTP client with auth cookies from Agent Zero login."""
@@ -48,26 +50,70 @@ class AgentZeroClient:
 
     async def send_message_blocking(self, context_id: str, text: str) -> str:
         """Fallback: send message via blocking /api_message endpoint."""
-        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-            response = await client.post(
-                f"{self.base_url}/api_message",
-                json={"message": text, "context_id": context_id},
-                headers={"X-API-KEY": self.api_key},
-            )
-            if response.status_code == 404 and context_id:
-                logger.info("Context %s not found, retrying without context_id", context_id)
-                response = await client.post(
-                    f"{self.base_url}/api_message",
-                    json={"message": text, "context_id": ""},
-                    headers={"X-API-KEY": self.api_key},
+        http_client = await self._get_http_client()
+        queue_headers = {"X-API-KEY": self.api_key}
+        # Fetch CSRF token for queue endpoints
+        try:
+            resp = await http_client.get(f"{self.base_url}/csrf_token")
+            if resp.status_code == 200:
+                csrf_data = resp.json()
+                csrf_token = csrf_data.get("token") or csrf_data.get("csrf_token")
+                if csrf_token:
+                    queue_headers["X-CSRF-Token"] = csrf_token
+        except Exception:
+            pass
+        try:
+            # Ensure the context exists
+            if context_id not in self._known_contexts:
+                resp = await http_client.post(
+                    f"{self.base_url}/chat_create",
+                    json={"new_context": context_id},
+                    headers=queue_headers,
                 )
-            response.raise_for_status()
-            data = response.json()
-        return data.get("response") or data.get("message") or str(data)
+                if resp.status_code == 200:
+                    self._known_contexts.add(context_id)
+            # Use the message queue path (same as streaming) to preserve context mapping
+            await http_client.post(
+                f"{self.base_url}/message_queue_add",
+                json={"context": context_id, "text": text, "attachments": []},
+                headers=queue_headers,
+            )
+            await http_client.post(
+                f"{self.base_url}/message_queue_send",
+                json={"context": context_id, "send_all": True},
+                headers=queue_headers,
+            )
+            # Poll for completion via context logs
+            deadline = time.monotonic() + REQUEST_TIMEOUT
+            while time.monotonic() < deadline:
+                await asyncio.sleep(2)
+                try:
+                    resp = await http_client.get(
+                        f"{self.base_url}/state",
+                        params={"context": context_id, "log_from": 0},
+                        headers=queue_headers,
+                    )
+                    if resp.status_code == 200:
+                        state = resp.json()
+                        snapshot = state.get("snapshot", {})
+                        if not snapshot.get("log_progress_active", True):
+                            logs = snapshot.get("logs", [])
+                            parts = [l.get("content", "") for l in logs if l.get("type") == "response" and l.get("content")]
+                            if parts:
+                                return "\n\n".join(parts)
+                            break
+                except Exception:
+                    pass
+            return "(Agent Zero returned an empty response.)"
+        finally:
+            await http_client.aclose()
 
     async def send_message_streaming(self, context_id: str, text: str, attachments: list | None = None):
         """Send a message and yield (response_text, is_done) as the agent streams."""
+        t0 = time.monotonic()
+        logger.info("[stream:%s] START send_message_streaming", context_id)
         http_client = await self._get_http_client()
+        logger.info("[stream:%s] HTTP client ready (+%.2fs)", context_id, time.monotonic() - t0)
         stream_state = StreamState()
 
         sio = socketio.AsyncClient(
@@ -89,8 +135,9 @@ class AgentZeroClient:
 
         headers = {"Origin": self.base_url}
         cookie_parts = []
+        # Build cookie header from the jar (avoids CookieConflict on duplicate names)
         if http_client.cookies:
-            cookie_parts = [f"{k}={v}" for k, v in http_client.cookies.items()]
+            cookie_parts.append("; ".join(f"{c.name}={c.value}" for c in http_client.cookies.jar))
         if csrf_token and runtime_id:
             cookie_parts.append(f"csrf_token_{runtime_id}={csrf_token}")
         if cookie_parts:
@@ -146,6 +193,30 @@ class AgentZeroClient:
                 logger.info("[state_push] log type=%s, content_len=%d, content_preview=%r",
                             log_type, len(content), content[:300] if content else "")
 
+            # Extract intermediate status from agent thoughts and code_exe
+            for log_item in new_logs:
+                log_type = log_item.get("type", "")
+                content = log_item.get("content", "")
+                if not content:
+                    continue
+                if log_type == "agent":
+                    try:
+                        import json as _json
+                        parsed = _json.loads(content)
+                        thoughts = parsed.get("thoughts", [])
+                        if thoughts:
+                            thought = thoughts[0][:100]
+                            stream_state.status_line = thought
+                            stream_state.event.set()
+                    except (ValueError, TypeError):
+                        pass
+                elif log_type == "code_exe":
+                    # Take the last non-empty line as the most current status
+                    lines = [l.strip() for l in content.strip().splitlines() if l.strip()]
+                    if lines:
+                        stream_state.status_line = f"terminal> {lines[-1][:150]}"
+                        stream_state.event.set()
+
             # Concatenate ALL response content from new logs
             response_parts = []
             for log_item in new_logs:
@@ -191,11 +262,12 @@ class AgentZeroClient:
                 auth=auth if auth else None,
                 wait_timeout=10,
             )
+            logger.info("[stream:%s] WebSocket connected (+%.2fs)", context_id, time.monotonic() - t0)
         except Exception:
             logger.warning("WebSocket connection failed, falling back to blocking API")
             await http_client.aclose()
             result = await self.send_message_blocking(context_id, text)
-            yield result, True
+            yield result, True, ""
             return
 
         # Subscribe to state updates
@@ -210,6 +282,7 @@ class AgentZeroClient:
                 },
                 namespace="/state_sync",
             )
+            logger.info("[stream:%s] state_request sent (+%.2fs)", context_id, time.monotonic() - t0)
         except Exception:
             logger.warning("Failed to send state_request")
 
@@ -218,13 +291,17 @@ class AgentZeroClient:
         if csrf_token:
             queue_headers["X-CSRF-Token"] = csrf_token
         try:
-            resp = await http_client.post(
-                f"{self.base_url}/chat_create",
-                json={"new_context": context_id},
-                headers=queue_headers,
-            )
-            if resp.status_code == 200:
-                logger.debug("Context %s ensured via chat_create", context_id)
+            # Only create the chat context if it's the first time we've seen it.
+            # Calling chat_create on every message creates duplicate chats in Agent Zero.
+            if context_id not in self._known_contexts:
+                resp = await http_client.post(
+                    f"{self.base_url}/chat_create",
+                    json={"new_context": context_id},
+                    headers=queue_headers,
+                )
+                if resp.status_code == 200:
+                    self._known_contexts.add(context_id)
+                    logger.debug("Context %s created via chat_create", context_id)
 
             await http_client.post(
                 f"{self.base_url}/message_queue_add",
@@ -236,16 +313,18 @@ class AgentZeroClient:
                 json={"context": context_id, "send_all": True},
                 headers=queue_headers,
             )
+            logger.info("[stream:%s] message queued and sent (+%.2fs)", context_id, time.monotonic() - t0)
         except Exception:
             logger.warning("message_queue path failed, trying /api_message via WebSocket fallback")
             await sio.disconnect()
             await http_client.aclose()
             result = await self.send_message_blocking(context_id, text)
-            yield result, True
+            yield result, True, ""
             return
 
         # Stream response chunks
         last_text = ""
+        last_status = ""
         timeout_at = time.monotonic() + REQUEST_TIMEOUT
         try:
             while time.monotonic() < timeout_at:
@@ -258,19 +337,21 @@ class AgentZeroClient:
                     continue
 
                 current_text = stream_state.response_text
-                if current_text != last_text:
+                current_status = stream_state.status_line
+                if current_text != last_text or current_status != last_status:
                     last_text = current_text
-                    yield current_text, stream_state.is_done
+                    last_status = current_status
+                    yield current_text, stream_state.is_done, current_status
 
                 if stream_state.is_done:
                     # Re-read in case response was updated while consumer processed the yield
                     final = stream_state.response_text
                     if final != last_text:
-                        yield final, True
+                        yield final, True, stream_state.status_line
                     break
 
             if not stream_state.is_done and last_text:
-                yield last_text, True
+                yield last_text, True, stream_state.status_line
         finally:
             try:
                 await sio.disconnect()

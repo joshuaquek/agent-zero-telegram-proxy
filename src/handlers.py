@@ -58,6 +58,13 @@ async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text("Failed to reset the conversation. Please try again.")
 
 
+def _format_status_line(status_line: str) -> str:
+    """Format an intermediate step as a user-facing status line."""
+    if status_line.startswith("terminal> "):
+        return f"⚙️ {status_line}"
+    return f"🔄 {status_line}"
+
+
 async def _stream_to_private_chat(
     bot, chat_id: int, ctx_id: str, text: str,
     attachments: list | None = None, message_thread_id: int | None = None,
@@ -69,7 +76,7 @@ async def _stream_to_private_chat(
     final_text = ""
 
     try:
-        async for response_text, is_done in agent_client.send_message_streaming(ctx_id, text, attachments):
+        async for response_text, is_done, status_line in agent_client.send_message_streaming(ctx_id, text, attachments):
             final_text = response_text
             now = time.monotonic()
 
@@ -80,13 +87,20 @@ async def _stream_to_private_chat(
             if now - last_draft_time < throttle_sec:
                 continue
 
-            # Send draft — convert to HTML only if tags are balanced
-            draft_converted, draft_is_html = safe_md_to_tg_html(response_text)
-            draft_text = draft_converted[:4096]
+            # Build draft text: show status line when no response yet, response once it starts
+            if response_text.strip():
+                draft_converted, draft_is_html = safe_md_to_tg_html(response_text)
+                draft_text = draft_converted[:4096]
+            elif status_line:
+                draft_text = _format_status_line(status_line)
+                draft_is_html = False
+            else:
+                continue
+
             if draft_text.strip():
                 try:
                     kwargs = {"chat_id": chat_id, "draft_id": draft_id, "text": draft_text}
-                    if draft_is_html:
+                    if response_text.strip() and draft_is_html:
                         kwargs["parse_mode"] = ParseMode.HTML
                     if message_thread_id is not None:
                         kwargs["message_thread_id"] = message_thread_id
@@ -113,12 +127,12 @@ async def _stream_to_group_chat(
     """Stream response to a group chat using sendMessage + editMessageText."""
     sent_message = None
     last_edit_time = 0.0
-    edit_throttle_sec = 1.0
+    edit_throttle_sec = 0.5
     final_text = ""
     thread_kw = {"message_thread_id": message_thread_id} if message_thread_id is not None else {}
 
     try:
-        async for response_text, is_done in agent_client.send_message_streaming(ctx_id, text, attachments):
+        async for response_text, is_done, status_line in agent_client.send_message_streaming(ctx_id, text, attachments):
             final_text = response_text
             now = time.monotonic()
 
@@ -129,8 +143,16 @@ async def _stream_to_group_chat(
             if now - last_edit_time < edit_throttle_sec:
                 continue
 
-            preview_converted, preview_is_html = safe_md_to_tg_html(response_text)
-            preview_text = preview_converted[:4096]
+            # Build preview: show status line when no response yet, response once it starts
+            if response_text.strip():
+                preview_converted, preview_is_html = safe_md_to_tg_html(response_text)
+                preview_text = preview_converted[:4096]
+            elif status_line:
+                preview_text = _format_status_line(status_line)
+                preview_is_html = False
+            else:
+                continue
+
             if not preview_text.strip():
                 continue
 

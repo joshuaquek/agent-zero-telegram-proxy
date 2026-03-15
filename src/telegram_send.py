@@ -96,14 +96,19 @@ async def edit_html_message(bot, chat_id: int, message_id: int, text: str, **kwa
             text=text, parse_mode=ParseMode.HTML, **kwargs,
         )
         return True
-    except Exception:
+    except Exception as exc:
+        # "Message is not modified" means the content is already correct
+        if "message is not modified" in str(exc).lower():
+            return True
         logger.warning("HTML edit failed, falling back to plain text")
         try:
             await bot.edit_message_text(
                 chat_id=chat_id, message_id=message_id, text=_strip_html(text), **kwargs,
             )
             return True
-        except Exception:
+        except Exception as exc2:
+            if "message is not modified" in str(exc2).lower():
+                return True
             logger.debug("Plain text edit also failed")
             return False
 
